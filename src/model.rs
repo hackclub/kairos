@@ -1,0 +1,323 @@
+//! A model API that plays the scenario instead of thinking: each request of the armed turn gets the next scripted
+//! tool call, then the closing text. Tool call ids carry the turn and step, so a retried request gets the same answer.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
+use tiny_http::{Header, Method, Request, Response, Server};
+
+use crate::scenario::{Act, Scenario};
+
+struct State {
+    scenario: Arc<Scenario>,
+    project: PathBuf,
+    turn: Option<usize>,
+    said: Vec<bool>,
+    requests: Vec<Value>,
+    problems: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct Model {
+    pub port: u16,
+    state: Arc<Mutex<State>>,
+}
+
+enum Plan {
+    Side,
+    Act(String, Act),
+    Say(String),
+}
+
+impl Model {
+    pub fn start(scenario: Arc<Scenario>, project: PathBuf) -> Result<Model> {
+        let server = Server::http("127.0.0.1:0").map_err(|e| anyhow!("{e}"))?;
+        let port = server.server_addr().to_ip().ok_or_else(|| anyhow!("the model server has no port"))?.port();
+        let said = vec![false; scenario.turns.len()];
+        let state = Arc::new(Mutex::new(State { scenario, project, turn: None, said, requests: Vec::new(), problems: Vec::new() }));
+        let shared = state.clone();
+        thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let state = shared.clone();
+                thread::spawn(move || handle(&state, req));
+            }
+        });
+        Ok(Model { port, state })
+    }
+
+    pub fn arm(&self, turn: usize) {
+        self.state.lock().unwrap().turn = Some(turn);
+    }
+
+    pub fn said(&self, turn: usize) -> bool {
+        self.state.lock().unwrap().said[turn]
+    }
+
+    pub fn problems(&self) -> Vec<String> {
+        self.state.lock().unwrap().problems.clone()
+    }
+
+    pub fn requests(&self) -> Vec<Value> {
+        self.state.lock().unwrap().requests.clone()
+    }
+}
+
+fn pos(id: &str) -> Option<(usize, usize)> {
+    let (turn, step) = id.rsplit_once("lab_")?.1.split_once('_')?;
+    Some((turn.parse().ok()?, step.parse().ok()?))
+}
+
+fn plan(state: &Mutex<State>, main: bool, answered: &[String]) -> Plan {
+    let mut s = state.lock().unwrap();
+    let Some(turn) = s.turn.filter(|_| main) else { return Plan::Side };
+    let step = answered.iter().filter_map(|id| pos(id)).filter(|p| p.0 == turn).map(|p| p.1 + 1).max().unwrap_or(0);
+    let scenario = s.scenario.clone();
+    match scenario.turns[turn].acts.get(step) {
+        Some(act) => Plan::Act(format!("lab_{turn}_{step}"), *act),
+        None => {
+            s.said[turn] = true;
+            Plan::Say(scenario.turns[turn].say.to_string())
+        }
+    }
+}
+
+fn names(tools: &[Value]) -> Vec<String> {
+    tools.iter().map(|t| t["name"].as_str().or(t["function"]["name"].as_str()).or(t["type"].as_str()).unwrap_or("?").to_string()).collect()
+}
+
+fn sse(events: &[(&str, Value)]) -> String {
+    events.iter().map(|(name, data)| format!("event: {name}\ndata: {data}\n\n")).collect()
+}
+
+fn anthropic(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
+    let tools = body["tools"].as_array().cloned().unwrap_or_default();
+    let offered = names(&tools);
+    let main = ["Write", "Edit", "Bash"].iter().all(|n| offered.iter().any(|o| o == n));
+    let answered: Vec<String> = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|b| b["type"] == "tool_result")
+        .filter_map(|b| b["tool_use_id"].as_str().map(str::to_string))
+        .collect();
+    let project = state.lock().unwrap().project.clone();
+    let file = |p: &str| project.join(p).to_string_lossy().into_owned();
+    let (note, block) = match plan(state, main, &answered) {
+        Plan::Side => ("side".to_string(), json!({ "type": "text", "text": "ok" })),
+        Plan::Say(text) => ("say".to_string(), json!({ "type": "text", "text": text })),
+        Plan::Act(id, act) => {
+            let (name, input) = match act {
+                Act::Write { path, content } => ("Write", json!({ "file_path": file(path), "content": content })),
+                Act::Edit { path, old, new } => ("Edit", json!({ "file_path": file(path), "old_string": old, "new_string": new })),
+                Act::Shell { cmd } => ("Bash", json!({ "command": cmd, "description": "Run the scripted command" })),
+            };
+            (id.clone(), json!({ "type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input }))
+        }
+    };
+    let text = block["type"] == "text";
+    let stop = if text { "end_turn" } else { "tool_use" };
+    let message = json!({
+        "id": format!("msg_{note}"), "type": "message", "role": "assistant", "model": body["model"], "content": [], "stop_reason": null,
+        "stop_sequence": null, "usage": { "input_tokens": 10, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0 }
+    });
+    if body["stream"] != true {
+        let mut full = message;
+        full["content"] = json!([block]);
+        full["stop_reason"] = json!(stop);
+        return ("application/json", full.to_string(), note);
+    }
+    let (start, delta) = if text {
+        (json!({ "type": "text", "text": "" }), json!({ "type": "text_delta", "text": block["text"] }))
+    } else {
+        let empty = json!({ "type": "tool_use", "id": block["id"], "name": block["name"], "input": {} });
+        (empty, json!({ "type": "input_json_delta", "partial_json": block["input"].to_string() }))
+    };
+    let out = sse(&[
+        ("message_start", json!({ "type": "message_start", "message": message })),
+        ("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": start })),
+        ("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": delta })),
+        ("content_block_stop", json!({ "type": "content_block_stop", "index": 0 })),
+        ("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": stop, "stop_sequence": null }, "usage": { "output_tokens": 20 } })),
+        ("message_stop", json!({ "type": "message_stop" })),
+    ]);
+    ("text/event-stream", out, note)
+}
+
+fn patch_lines(sign: char, text: &str) -> String {
+    text.lines().map(|l| format!("{sign}{l}\n")).collect()
+}
+
+/// A shell call in whichever form this version offers, with the arguments its own schema names.
+fn shell_item(tools: &[Value], call_id: &str, cmd: &str, project: &Path) -> Option<Value> {
+    let dir = project.to_string_lossy();
+    if tools.iter().any(|t| t["type"] == "local_shell") {
+        let action = json!({ "type": "exec", "command": ["bash", "-lc", cmd], "working_directory": dir });
+        return Some(json!({ "type": "local_shell_call", "call_id": call_id, "status": "completed", "action": action }));
+    }
+    let tool = ["exec_command", "shell_command", "shell"].iter().find_map(|n| tools.iter().find(|t| t["name"] == *n))?;
+    let props = &tool["parameters"]["properties"];
+    let mut args = json!({});
+    if props["command"]["type"] == "array" {
+        args["command"] = json!(["bash", "-lc", cmd]);
+    } else if props.get("command").is_some() {
+        args["command"] = json!(cmd);
+    } else if props.get("cmd").is_some() {
+        args["cmd"] = json!(cmd);
+    } else {
+        return None;
+    }
+    if props.get("workdir").is_some() {
+        args["workdir"] = json!(dir);
+    }
+    Some(json!({ "type": "function_call", "name": tool["name"], "arguments": args.to_string(), "call_id": call_id }))
+}
+
+fn patch_item(tools: &[Value], call_id: &str, patch: &str, project: &Path) -> Option<Value> {
+    match tools.iter().find(|t| t["name"] == "apply_patch") {
+        Some(t) if t["type"] == "custom" => Some(json!({ "type": "custom_tool_call", "name": "apply_patch", "input": patch, "call_id": call_id })),
+        Some(_) => Some(json!({ "type": "function_call", "name": "apply_patch", "arguments": json!({ "input": patch }).to_string(), "call_id": call_id })),
+        None => shell_item(tools, call_id, &format!("apply_patch <<'EOF'\n{patch}EOF"), project),
+    }
+}
+
+fn responses(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
+    let tools = body["tools"].as_array().cloned().unwrap_or_default();
+    let input = body["input"].as_array().cloned().unwrap_or_default();
+    let main = !tools.is_empty() && !input.is_empty();
+    let answered: Vec<String> = input
+        .iter()
+        .filter(|i| i["type"].as_str().is_some_and(|t| t.ends_with("_output")))
+        .filter_map(|i| i["call_id"].as_str().map(str::to_string))
+        .collect();
+    let project = state.lock().unwrap().project.clone();
+    let message = |text: &str| json!({ "type": "message", "role": "assistant", "id": "msg_lab", "content": [{ "type": "output_text", "text": text }] });
+    let (note, item) = match plan(state, main, &answered) {
+        Plan::Side => ("side".to_string(), message("ok")),
+        Plan::Say(text) => ("say".to_string(), message(&text)),
+        Plan::Act(id, act) => {
+            let call_id = format!("call_{id}");
+            let item = match act {
+                Act::Write { path, content } => {
+                    let patch = format!("*** Begin Patch\n*** Add File: {path}\n{}*** End Patch\n", patch_lines('+', content));
+                    patch_item(&tools, &call_id, &patch, &project)
+                }
+                Act::Edit { path, old, new } => {
+                    let patch = format!("*** Begin Patch\n*** Update File: {path}\n@@\n{}{}*** End Patch\n", patch_lines('-', old), patch_lines('+', new));
+                    patch_item(&tools, &call_id, &patch, &project)
+                }
+                Act::Shell { cmd } => shell_item(&tools, &call_id, cmd, &project),
+            };
+            match item {
+                Some(item) => (id, item),
+                None => {
+                    let problem = format!("step {id}: this version offers no tool the lab knows for it: {:?}", names(&tools));
+                    state.lock().unwrap().problems.push(problem);
+                    (id, message("The lab has no tool for this step."))
+                }
+            }
+        }
+    };
+    let usage = json!({
+        "input_tokens": 10, "input_tokens_details": { "cached_tokens": 0 }, "output_tokens": 20,
+        "output_tokens_details": { "reasoning_tokens": 0 }, "total_tokens": 30
+    });
+    let out = sse(&[
+        ("response.created", json!({ "type": "response.created", "response": { "id": "resp_lab" } })),
+        ("response.output_item.done", json!({ "type": "response.output_item.done", "output_index": 0, "item": item })),
+        ("response.completed", json!({ "type": "response.completed", "response": { "id": "resp_lab", "usage": usage } })),
+    ]);
+    ("text/event-stream", out, note)
+}
+
+/// A chat completions tool call, by the tool and argument names this version offers (1.x says `bash` and `filePath`).
+fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)> {
+    let find = |names: &[&str]| names.iter().find_map(|n| tools.iter().find(|t| t["name"] == *n));
+    let key = |tool: &Value, names: &[&str]| names.iter().find(|n| tool["parameters"]["properties"].get(**n).is_some()).map(|n| n.to_string());
+    let (tool, mut args, path) = match act {
+        Act::Write { path, content } => (find(&["write"])?, json!({ "content": content }), Some(path)),
+        Act::Edit { path, old, new } => (find(&["edit"])?, json!({ "oldString": old, "newString": new }), Some(path)),
+        Act::Shell { cmd } => (find(&["shell", "bash"])?, json!({ "command": cmd }), None),
+    };
+    if let Some(path) = path {
+        args[key(tool, &["path", "filePath"])?] = json!(project.join(path).to_string_lossy());
+    }
+    if key(tool, &["description"]).is_some() {
+        args["description"] = json!("Run the scripted command");
+    }
+    Some((tool["name"].clone(), args))
+}
+
+fn chat(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
+    let tools: Vec<Value> = body["tools"].as_array().into_iter().flatten().map(|t| t["function"].clone()).collect();
+    let answered: Vec<String> = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "tool")
+        .filter_map(|m| m["tool_call_id"].as_str().map(str::to_string))
+        .collect();
+    let project = state.lock().unwrap().project.clone();
+    let text = |t: &str| (json!({ "role": "assistant", "content": t }), "stop");
+    let (note, (delta, finish)) = match plan(state, !tools.is_empty(), &answered) {
+        Plan::Side => ("side".to_string(), text("ok")),
+        Plan::Say(t) => ("say".to_string(), text(&t)),
+        Plan::Act(id, act) => match chat_call(&tools, act, &project) {
+            Some((name, args)) => {
+                let call = json!({ "index": 0, "id": format!("call_{id}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } });
+                (id, (json!({ "role": "assistant", "content": null, "tool_calls": [call] }), "tool_calls"))
+            }
+            None => {
+                let problem = format!("step {id}: this version offers no tool the lab knows for it: {:?}", names(&tools));
+                state.lock().unwrap().problems.push(problem);
+                (id, text("The lab has no tool for this step."))
+            }
+        },
+    };
+    let usage = json!({ "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30 });
+    if body["stream"] != true {
+        let choices = json!([{ "index": 0, "message": delta, "finish_reason": finish }]);
+        let full = json!({ "id": "chatcmpl-lab", "object": "chat.completion", "created": 0, "model": body["model"], "choices": choices, "usage": usage });
+        return ("application/json", full.to_string(), note);
+    }
+    let chunk = |choices: Value| json!({ "id": "chatcmpl-lab", "object": "chat.completion.chunk", "created": 0, "model": body["model"], "choices": choices });
+    let first = chunk(json!([{ "index": 0, "delta": delta, "finish_reason": null }]));
+    let last = chunk(json!([{ "index": 0, "delta": {}, "finish_reason": finish }]));
+    let mut tail = chunk(json!([]));
+    tail["usage"] = usage;
+    ("text/event-stream", format!("data: {first}\n\ndata: {last}\n\ndata: {tail}\n\ndata: [DONE]\n\n"), note)
+}
+
+fn handle(state: &Mutex<State>, mut req: Request) {
+    let mut raw = String::new();
+    let _ = req.as_reader().read_to_string(&mut raw);
+    let body: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or_default();
+    let (ctype, out, note) = if *req.method() != Method::Post {
+        ("application/json", json!({ "object": "list", "data": [] }).to_string(), "get".to_string())
+    } else if path.ends_with("/messages/count_tokens") {
+        ("application/json", json!({ "input_tokens": 42 }).to_string(), "count".to_string())
+    } else if path.ends_with("/messages") {
+        anthropic(state, &body)
+    } else if path.ends_with("/responses") {
+        responses(state, &body)
+    } else if path.ends_with("/chat/completions") {
+        chat(state, &body)
+    } else {
+        ("application/json", "{}".to_string(), "unknown".to_string())
+    };
+    let tools = names(body["tools"].as_array().map(Vec::as_slice).unwrap_or_default());
+    let record = json!({ "method": req.method().as_str(), "path": url, "model": body["model"], "stream": body["stream"], "tools": tools, "reply": note });
+    state.lock().unwrap().requests.push(record);
+    if note.starts_with("lab_") || note == "say" {
+        thread::sleep(Duration::from_millis(1000));
+    }
+    let header = Header::from_bytes("Content-Type", ctype).expect("a plain header");
+    let _ = req.respond(Response::from_string(out).with_header(header));
+}

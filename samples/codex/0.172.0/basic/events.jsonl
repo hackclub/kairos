@@ -1,0 +1,10 @@
+{"harness":"codex","kind":"prompt","pasted":false,"project":"proj","session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","shape":{"blank":0,"capitalized":0,"casual":0,"chars":60,"digits":0,"ended":0,"indented":0,"lines":1,"logish":0,"markdown":0,"pictographs":0,"rules":0,"sentences":1,"symbols":0,"trailing":0,"typographic":0},"ts":1795561223.066,"v":1,"version":"0.172.0","words":11}
+{"harness":"codex","kind":"agent_start","project":"proj","session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","ts":1795561224.082,"v":1}
+{"added":5,"harness":"codex","kind":"agent_edit","path":"hello.py","project":"proj","removed":0,"session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","ts":1795561224.092,"v":1}
+{"added":2,"harness":"codex","kind":"agent_edit","path":"hello.py","project":"proj","removed":1,"session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","ts":1795561225.113,"v":1}
+{"harness":"codex","kind":"agent_commit","project":"proj","session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","sha":"eccbf64","ts":1795561226.146,"v":1}
+{"files_changed":1,"harness":"codex","kind":"reply_done","model":"gpt-5.1-codex","project":"proj","reply_words":10,"session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","tools":3,"ts":1795561227.167,"v":1}
+{"harness":"codex","kind":"prompt","pasted":false,"project":"proj","session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","shape":{"blank":0,"capitalized":0,"casual":0,"chars":48,"digits":0,"ended":0,"indented":0,"lines":1,"logish":0,"markdown":0,"pictographs":0,"rules":0,"sentences":1,"symbols":0,"trailing":0,"typographic":0},"ts":1795561231.962,"v":1,"version":"0.172.0","words":9}
+{"harness":"codex","kind":"agent_start","project":"proj","session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","ts":1795561232.977,"v":1}
+{"added":2,"harness":"codex","kind":"agent_edit","path":"hello.py","project":"proj","removed":1,"session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","ts":1795561232.981,"v":1}
+{"files_changed":1,"harness":"codex","kind":"reply_done","model":"gpt-5.1-codex","project":"proj","reply_words":4,"session":"01a20fc9-dd5e-71f3-9a00-2523a601737f","tools":1,"ts":1795561234.001,"v":1}

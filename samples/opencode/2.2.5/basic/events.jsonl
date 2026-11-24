@@ -1,0 +1,10 @@
+{"harness":"opencode","kind":"prompt","pasted":false,"project":"proj","session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","shape":{"blank":0,"capitalized":0,"casual":0,"chars":60,"digits":0,"ended":0,"indented":0,"lines":1,"logish":0,"markdown":0,"pictographs":0,"rules":0,"sentences":1,"symbols":0,"trailing":0,"typographic":0},"ts":1795561838.97,"v":1,"version":"2.2.5","words":11}
+{"harness":"opencode","kind":"agent_start","project":"proj","session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","ts":1795561840.003,"v":1}
+{"added":5,"harness":"opencode","kind":"agent_edit","path":"hello.py","project":"proj","removed":0,"session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","ts":1795561840.015,"v":1}
+{"added":2,"harness":"opencode","kind":"agent_edit","path":"hello.py","project":"proj","removed":1,"session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","ts":1795561841.081,"v":1}
+{"harness":"opencode","kind":"agent_commit","project":"proj","session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","sha":"60ca1bf","ts":1795561842.153,"v":1}
+{"files_changed":1,"harness":"opencode","kind":"reply_done","model":"test-model","project":"proj","reply_words":10,"session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","tools":3,"ts":1795561843.192,"v":1}
+{"harness":"opencode","kind":"prompt","pasted":false,"project":"proj","session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","shape":{"blank":0,"capitalized":0,"casual":0,"chars":48,"digits":0,"ended":0,"indented":0,"lines":1,"logish":0,"markdown":0,"pictographs":0,"rules":0,"sentences":1,"symbols":0,"trailing":0,"typographic":0},"ts":1795561848.108,"v":1,"version":"2.2.5","words":9}
+{"harness":"opencode","kind":"agent_start","project":"proj","session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","ts":1795561849.123,"v":1}
+{"added":2,"harness":"opencode","kind":"agent_edit","path":"hello.py","project":"proj","removed":1,"session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","ts":1795561849.132,"v":1}
+{"files_changed":1,"harness":"opencode","kind":"reply_done","model":"test-model","project":"proj","reply_words":4,"session":"ses_df02ca6e4ffeLxIYFRJIonCkjo","tools":1,"ts":1795561850.187,"v":1}
