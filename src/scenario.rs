@@ -89,7 +89,9 @@ pub fn basic() -> Scenario {
                 acts: vec![
                     Act::Write { path: "hello.py", content: "def greet(name):\n    return \"hello \" + name\n\n\nprint(greet(\"world\"))\n" },
                     Act::Edit { path: "hello.py", old: "print(greet(\"world\"))", new: "print(greet(\"kairos\"))\nprint(greet(\"lab\"))" },
-                    Act::Shell { cmd: "git add -A && git commit -m \"add hello\"" },
+                    // Two plain commands, since Windows PowerShell has no `&&`.
+                    Act::Shell { cmd: "git add -A" },
+                    Act::Shell { cmd: "git commit -m \"add hello\"" },
                 ],
                 say: "Done. I wrote hello.py, changed the greeting and committed it.",
             },

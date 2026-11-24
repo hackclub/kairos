@@ -19,7 +19,7 @@ use model::Model;
 use scenario::Scenario;
 use term::{Term, ENTER};
 
-const USAGE: &str = "usage: lab run <harness> [version|latest] --kairosd PATH [--work DIR] [--save DIR]";
+const USAGE: &str = "usage: lab run <harness> [version|latest] --kairosd PATH [--work DIR] [--save DIR] [--real-home]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
 const STRAY_ENV: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -40,17 +40,19 @@ struct Args {
     kairosd: PathBuf,
     work: PathBuf,
     save: Option<PathBuf>,
+    real_home: bool,
 }
 
 fn args() -> Result<Args> {
     let mut words = Vec::new();
-    let (mut kairosd, mut work, mut save) = (None, PathBuf::from("work"), None);
+    let (mut kairosd, mut work, mut save, mut real_home) = (None, PathBuf::from("work"), None, false);
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--kairosd" => kairosd = it.next().map(PathBuf::from),
             "--work" => work = it.next().map(PathBuf::from).context(USAGE)?,
             "--save" => save = it.next().map(PathBuf::from),
+            "--real-home" => real_home = true,
             _ => words.push(a),
         }
     }
@@ -60,9 +62,10 @@ fn args() -> Result<Args> {
     Ok(Args {
         harness: words[1].clone(),
         version: words.get(2).cloned().unwrap_or_else(|| "latest".to_string()),
-        kairosd: fs::canonicalize(kairosd.context(USAGE)?).context("no kairosd at that path")?,
+        kairosd: std::path::absolute(kairosd.context(USAGE)?)?,
         work,
         save,
+        real_home,
     })
 }
 
@@ -156,9 +159,18 @@ fn differ(problems: &mut Vec<String>, turn: usize, what: &str, got: &Value, want
 }
 
 /// Compares what Kairos recorded with what the script did, and the script with what is on disk.
-fn check(h: &Harness, version: &str, scenario: &Scenario, mine: &[Value], project: &Path) -> Result<Vec<String>> {
+fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project: &Path) -> Result<Vec<String>> {
     let mut problems = Vec::new();
-    for (path, content) in scenario.files() {
+    let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
+    let files = scenario.files();
+    for save in all.iter().filter(|e| e["kind"] == "file_save") {
+        for path in save["paths"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if !files.contains_key(path) {
+                problems.push(format!("file_save names {path}, a file the script never wrote"));
+            }
+        }
+    }
+    for (path, content) in files {
         if fs::read_to_string(project.join(&path)).unwrap_or_default() != content {
             problems.push(format!("{path} on disk is not what the script wrote, so {} did not follow it", h.id));
         }
@@ -169,7 +181,7 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, mine: &[Value], projec
     }
 
     let mut turns: Vec<Vec<&Value>> = Vec::new();
-    for e in mine {
+    for e in mine.iter().copied() {
         if e["kind"] == "prompt" {
             turns.push(Vec::new());
         }
@@ -231,11 +243,29 @@ fn run() -> Result<bool> {
     let args = args()?;
     let h = harness::find(&args.harness)?;
     fs::create_dir_all(&args.work)?;
-    let root = fs::canonicalize(&args.work)?;
+    let root = std::path::absolute(&args.work)?;
     let (bin, version) = h.install(&args.version, &root.join("tools"))?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let run = root.join(format!("{}-{version}-{stamp}", h.id));
-    let (home, project, kd) = (run.join("home"), run.join("proj"), run.join("kd"));
+    // kairosd on Windows asks the system for the home folder, no variable moves it, so there the run uses the real one.
+    let home = if args.real_home {
+        if std::env::var_os("CI").is_none() {
+            bail!("--real-home rewrites harness settings and sessions in this account's home, so it only runs in CI");
+        }
+        let home = PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).context("no home folder")?);
+        for store in h.stores {
+            let old = home.join(store);
+            if old.is_dir() {
+                fs::remove_dir_all(&old)?;
+            } else if old.is_file() {
+                fs::remove_file(&old)?;
+            }
+        }
+        home
+    } else {
+        run.join("home")
+    };
+    let (project, kd) = (run.join("proj"), run.join("kd"));
     for d in [&home, &project, &kd] {
         fs::create_dir_all(d)?;
     }
@@ -261,7 +291,15 @@ fn run() -> Result<bool> {
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(&home, &url, &version)?;
-    let mut cmd = CommandBuilder::new(&bin);
+    // npm's launchers on Windows are batch files, which only cmd can start.
+    let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.arg("/c");
+        cmd.arg(&bin);
+        cmd
+    } else {
+        CommandBuilder::new(&bin)
+    };
     cmd.args(&launch.args);
     cmd.cwd(&project);
     cmd.env("HOME", &home);
@@ -296,7 +334,7 @@ fn run() -> Result<bool> {
     let all = events(&kd)?;
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
-    problems.extend(check(h, &version, &scenario, &mine, &project)?);
+    problems.extend(check(h, &version, &scenario, &all, &project)?);
     for e in &mine {
         println!("{e}");
     }

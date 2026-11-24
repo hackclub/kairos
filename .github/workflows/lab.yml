@@ -1,0 +1,49 @@
+name: lab
+on:
+  push:
+    branches: [lab]
+env:
+  KAIROS: 0.1.16
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x86_64, exe: "", home: "" }
+          - { os: windows-latest, target: windows-x86_64, exe: ".exe", home: "--real-home" }
+          - { os: macos-latest, target: macos-aarch64, exe: "", home: "" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: the released kairosd
+        shell: bash
+        run: |
+          curl -fsSL -o dist.tgz "https://github.com/hackclub/kairos/releases/download/v$KAIROS/kairos-dist-$KAIROS.tar.gz"
+          mkdir dist
+          tar -xzf dist.tgz -C dist
+      - name: every supported version
+        shell: bash
+        run: |
+          failed=0
+          while read -r harness version; do
+            [ -z "$harness" ] && continue
+            ./target/release/lab${{ matrix.exe }} run "$harness" "$version" --kairosd "dist/${{ matrix.target }}/kairosd${{ matrix.exe }}" ${{ matrix.home }} > out.txt 2>&1 || failed=1
+            grep -E "^(PASS|FAIL|lab:|  )" out.txt || tail -20 out.txt
+            rm -rf work/tools
+          done < versions.txt
+          exit $failed
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-${{ matrix.target }}
+          path: |
+            work
+            !work/*/home/.cache
+            !work/*/home/.npm
+          include-hidden-files: true
+          retention-days: 7
