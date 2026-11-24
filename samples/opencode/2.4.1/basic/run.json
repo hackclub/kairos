@@ -1,8 +1,8 @@
 {
   "harness": "opencode",
-  "home": "/data/home/lab-spike/lab/work/opencode-2.4.1-1795561791/home",
+  "home": "/data/home/lab-spike/lab/work/opencode-2.4.1-1795563841/home",
   "os": "linux",
-  "project": "/data/home/lab-spike/lab/work/opencode-2.4.1-1795561791/proj",
+  "project": "/data/home/lab-spike/lab/work/opencode-2.4.1-1795563841/proj",
   "scenario": "basic",
   "version": "2.4.1"
 }

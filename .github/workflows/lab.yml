@@ -3,7 +3,7 @@ on:
   push:
     branches: [lab]
 env:
-  KAIROS: 0.1.16
+  KAIROS: 0.1.17
 jobs:
   run:
     strategy:
@@ -31,6 +31,7 @@ jobs:
         run: |
           failed=0
           while read -r harness version; do
+            version=${version%$'\r'}
             [ -z "$harness" ] && continue
             ./target/release/lab${{ matrix.exe }} run "$harness" "$version" --kairosd "dist/${{ matrix.target }}/kairosd${{ matrix.exe }}" ${{ matrix.home }} > out.txt 2>&1 || failed=1
             grep -E "^(PASS|FAIL|lab:|  )" out.txt || tail -20 out.txt

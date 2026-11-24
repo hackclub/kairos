@@ -290,7 +290,7 @@ fn run() -> Result<bool> {
     let mut daemon = daemon.spawn().context("starting kairosd")?;
     sleep(Duration::from_secs(2));
 
-    let launch = (h.prepare)(&home, &url, &version)?;
+    let launch = (h.prepare)(&home, &project, &url, &version)?;
     // npm's launchers on Windows are batch files, which only cmd can start.
     let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
         let mut cmd = CommandBuilder::new("cmd.exe");

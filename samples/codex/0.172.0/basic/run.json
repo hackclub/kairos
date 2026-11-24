@@ -1,8 +1,8 @@
 {
   "harness": "codex",
-  "home": "/data/home/lab-spike/lab/work/codex-0.172.0-1795561213/home",
+  "home": "/data/home/lab-spike/lab/work/codex-0.172.0-1795563737/home",
   "os": "linux",
-  "project": "/data/home/lab-spike/lab/work/codex-0.172.0-1795561213/proj",
+  "project": "/data/home/lab-spike/lab/work/codex-0.172.0-1795563737/proj",
   "scenario": "basic",
   "version": "0.172.0"
 }

@@ -35,7 +35,7 @@ pub struct Harness {
     /// Any of these on a still screen means the prompt box is up.
     pub ready: &'static [&'static str],
     pub during: &'static [Rule],
-    pub prepare: fn(home: &Path, model_url: &str, version: &str) -> Result<Launch>,
+    pub prepare: fn(home: &Path, project: &Path, model_url: &str, version: &str) -> Result<Launch>,
 }
 
 pub const ALL: &[Harness] = &[
@@ -81,7 +81,7 @@ fn vars(env: &[(&str, &str)]) -> Vec<(String, String)> {
     env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
-fn claude(home: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+fn claude(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
     let dir = home.join(".claude");
     fs::create_dir_all(&dir)?;
     // Auto mode needs Anthropic's own servers, so the lab runs in accept edits and allows the scripted git commands.
@@ -96,18 +96,22 @@ fn claude(home: &Path, model_url: &str, _version: &str) -> Result<Launch> {
     Ok(Launch { args: Vec::new(), env: vars(&env), after: Vec::new() })
 }
 
-fn codex(home: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
     let dir = home.join(".codex");
     fs::create_dir_all(&dir)?;
+    // The folder is trusted up front, the way Codex itself saves it: its trust question comes up seconds after the
+    // prompt on a slow machine, and typing would land in it.
     let config = format!(
         "model = \"gpt-5.1-codex\"\nmodel_provider = \"lab\"\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n\n\
-         [model_providers.lab]\nname = \"lab\"\nbase_url = \"{model_url}/v1\"\nwire_api = \"responses\"\nenv_key = \"LAB_KEY\"\n"
+         [model_providers.lab]\nname = \"lab\"\nbase_url = \"{model_url}/v1\"\nwire_api = \"responses\"\nenv_key = \"LAB_KEY\"\n\n\
+         [projects.'{}']\ntrust_level = \"trusted\"\n",
+        project.display()
     );
     fs::write(dir.join("config.toml"), config)?;
     Ok(Launch { args: Vec::new(), env: vars(&[("LAB_KEY", "lab")]), after: Vec::new() })
 }
 
-fn opencode(home: &Path, model_url: &str, version: &str) -> Result<Launch> {
+fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Result<Launch> {
     let dir = home.join(".config").join("opencode");
     fs::create_dir_all(&dir)?;
     let base = format!("{model_url}/v1");
