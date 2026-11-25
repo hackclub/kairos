@@ -261,15 +261,37 @@ fn codex_app(want: &str) -> Result<(String, String)> {
     Ok((version, url))
 }
 
-/// The Codex app's first run, which the lab doesn't know yet: what it shows after a while.
+/// The Codex app's first run, which the lab doesn't know yet: each screen it shows and what the lab clicked there.
 fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
-    sleep(Duration::from_secs(40));
-    if let Ok(shot) = page.call("Page.captureScreenshot", json!({ "format": "png" })) {
-        fs::write(run.join("shot.b64"), shot["data"].as_str().unwrap_or_default())?;
+    sleep(Duration::from_secs(30));
+    let mut log = String::new();
+    for step in 0..10 {
+        if let Ok(shot) = page.call("Page.captureScreenshot", json!({ "format": "png" })) {
+            fs::write(run.join(format!("shot{step}.b64")), shot["data"].as_str().unwrap_or_default())?;
+        }
+        let ax = page.ax()?;
+        let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
+        fs::write(run.join(format!("ax{step}.txt")), lines.join("\n"))?;
+        let mut did = Vec::new();
+        for (roles, name) in [(&["radio", "checkbox", "button", "option"][..], "Engineering")] {
+            if page.ax_click(roles, name)? {
+                did.push(name);
+                sleep(Duration::from_secs(1));
+            }
+        }
+        let next = ["Continue", "Skip", "Next", "Get started", "Not now", "Done", "Maybe later", "Start building", "Open folder"];
+        if let Some(name) = next.into_iter().find(|n| ax.iter().any(|(r, m, _)| r == "button" && m == n)) {
+            page.ax_click(&["button"], name)?;
+            did.push(name);
+        }
+        log += &format!("step {step}: clicked {did:?}\n");
+        if did.is_empty() {
+            break;
+        }
+        sleep(Duration::from_secs(5));
     }
-    let targets = Command::new("curl").args(["-fsS", "-m", "5", &format!("http://127.0.0.1:{PORT}/json")]).output()?;
-    fs::write(run.join("targets.json"), targets.stdout)?;
-    bail!("the lab can't drive the Codex app yet. Page:\n{}", page.text()?)
+    fs::write(run.join("steps.txt"), &log)?;
+    bail!("the lab can't drive the Codex app yet:\n{log}")
 }
 
 struct Page {
@@ -376,6 +398,35 @@ impl Page {
             }
         }
         bail!("clicking {label:?} never brought up {next:?}. Page:\n{}", self.text()?)
+    }
+
+    /// What the page shows a screen reader: role and name of each named node, with its node for clicking.
+    fn ax(&mut self) -> Result<Vec<(String, String, Option<u64>)>> {
+        let tree = self.call("Accessibility.getFullAXTree", json!({}))?;
+        let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
+        Ok(nodes
+            .iter()
+            .filter(|n| n["ignored"] != json!(true))
+            .filter_map(|n| {
+                let name = n["name"]["value"].as_str().unwrap_or_default().trim().to_string();
+                (!name.is_empty()).then(|| (n["role"]["value"].as_str().unwrap_or_default().to_string(), name, n["backendDOMNodeId"].as_u64()))
+            })
+            .collect())
+    }
+
+    /// A left click in the middle of the first node a screen reader names `name`, of one of `roles`.
+    fn ax_click(&mut self, roles: &[&str], name: &str) -> Result<bool> {
+        let Some(id) = self.ax()?.into_iter().find(|(r, n, id)| roles.contains(&r.as_str()) && n == name && id.is_some()).and_then(|x| x.2) else {
+            return Ok(false);
+        };
+        let quad = self.call("DOM.getBoxModel", json!({ "backendNodeId": id }))?["model"]["content"].clone();
+        let q: Vec<f64> = quad.as_array().context("no box")?.iter().filter_map(Value::as_f64).collect();
+        let (x, y) = ((q[0] + q[2] + q[4] + q[6]) / 4.0, (q[1] + q[3] + q[5] + q[7]) / 4.0);
+        self.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y }))?;
+        self.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }))?;
+        sleep(Duration::from_millis(60));
+        self.call("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }))?;
+        Ok(true)
     }
 
     fn type_text(&mut self, text: &str) -> Result<()> {
@@ -625,6 +676,13 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     };
     if app.id == "antigravity-ide" {
         antigravity_setup(&p.home, &cli)?;
+        if OS == "macos" {
+            // VS Code's socket in its settings folder can't take a path longer than 103 characters, and the run's home
+            // is deep in the runner's work folder.
+            let short = PathBuf::from(format!("/tmp/lab-ide-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&short);
+            cmd.arg(format!("--user-data-dir={}", short.display()));
+        }
     }
     if OS == "linux" {
         // An unpacked .deb has no setuid sandbox helper, and Xvfb has no GPU.
