@@ -505,6 +505,8 @@ struct Known {
 const KNOWN: &[Known] = &[
     Known { bug: 23, harness: "", fixed: "0.1.20", text: "\"inner\"" },
     Known { bug: 29, harness: "antigravity", fixed: "", text: "credit came while nobody had touched anything" },
+    Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "in project null" },
+    Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "s the person spent reading and typing" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
@@ -590,7 +592,6 @@ fn run() -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 
-    // Its first nudge, which checks it can move the pointer, comes before kairosd watches.
     let person = Person::new(args.window)?;
     let start = || daemon(&args, &p);
     let mut daemon = start()?;

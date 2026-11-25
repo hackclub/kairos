@@ -1,5 +1,6 @@
 //! Desktop apps. The lab clicks and types in the app's own window through the Chrome DevTools protocol, which hands the
-//! page the same mouse and key events a person's hands do.
+//! page the same mouse and key events a person's hands do, or with the system's own key events when the app keeps its
+//! debugging port closed.
 
 use std::env::consts::{ARCH, OS};
 use std::fs::{self, OpenOptions};
@@ -17,8 +18,9 @@ use tungstenite::{Message, WebSocket};
 
 use crate::harness::{self, newest_release, output};
 use crate::model::Model;
+use crate::person::Person;
 use crate::scenario::{self, Scenario};
-use crate::{Args, STRAY_ENV};
+use crate::{credit, Args, STRAY_ENV};
 
 const PORT: u16 = 9333;
 
@@ -30,27 +32,65 @@ pub struct App {
     /// What it keeps in the home folder, removed before a run in a real home.
     state: &'static [&'static str],
     stores: &'static [&'static str],
+    /// The release file for this system, from the version.
+    asset: fn(&str) -> String,
+    /// The program's file name, where it isn't the one inside a macOS .app.
+    exe: fn(&str) -> bool,
+    drive: Drive,
 }
 
-pub const ALL: &[App] = &[App {
-    id: "t3code",
-    repo: "pingdotgg/t3code",
-    harness: "claude-code",
-    state: &[".t3", ".claude", ".claude.json"],
-    stores: &[".claude/projects", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
-}];
+enum Drive {
+    /// Over the app's debugging port.
+    Page,
+    /// The app opens the project from a link and its message box takes the keys.
+    Keys,
+}
+
+pub const ALL: &[App] = &[
+    App {
+        id: "t3code",
+        repo: "pingdotgg/t3code",
+        harness: "claude-code",
+        state: &[".t3", ".claude", ".claude.json"],
+        stores: &[".claude/projects", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
+        asset: |v| match (OS, ARCH) {
+            ("linux", _) => format!("T3-Code-{v}-amd64.deb"),
+            ("macos", "aarch64") => format!("T3-Code-{v}-arm64.zip"),
+            ("macos", _) => format!("T3-Code-{v}-x64.zip"),
+            _ => format!("T3-Code-{v}-x64.exe"),
+        },
+        exe: |name| if OS == "linux" { name == "t3code" } else { name.starts_with("T3 Code") && name.ends_with(".exe") },
+        drive: Drive::Page,
+    },
+    // Stable builds drop --remote-debugging-port. Its own state is in the system's app data folder, which on Windows
+    // isn't under the run's home.
+    App {
+        id: "opencode-desktop",
+        repo: "anomalyco/opencode",
+        harness: "opencode",
+        state: &[".config/opencode", ".config/ai.opencode.desktop", ".local/share/opencode", ".local/state/opencode"],
+        stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".config/ai.opencode.desktop/drafts.sqlite", ".config/ai.opencode.desktop/opencode.settings"],
+        asset: |_| match (OS, ARCH) {
+            ("linux", _) => "opencode-desktop-linux-amd64.deb".to_string(),
+            ("macos", "aarch64") => "opencode-desktop-mac-arm64.zip".to_string(),
+            ("macos", _) => "opencode-desktop-mac-x64.zip".to_string(),
+            _ => "opencode-desktop-win-x64.exe".to_string(),
+        },
+        exe: |name| if OS == "linux" { name == "ai.opencode" } else { name == "OpenCode.exe" },
+        drive: Drive::Keys,
+    },
+];
 
 pub fn find(id: &str) -> Option<&'static App> {
     ALL.iter().find(|a| a.id == id)
 }
 
 /// The app's program in what its package unpacked to.
-fn program(dir: &Path) -> Option<PathBuf> {
+fn program(dir: &Path, fits: fn(&str) -> bool) -> Option<PathBuf> {
     if OS == "macos" {
         let app = fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "app"))?;
         return fs::read_dir(app.join("Contents").join("MacOS")).ok()?.flatten().map(|e| e.path()).next();
     }
-    let fits = |name: &str| if OS == "linux" { name == "t3code" } else { name.starts_with("T3 Code") && name.ends_with(".exe") };
     let mut todo = vec![dir.to_path_buf()];
     while let Some(d) = todo.pop() {
         let Ok(entries) = fs::read_dir(&d) else { continue };
@@ -70,16 +110,11 @@ impl App {
     fn install(&self, want: &str, tools: &Path) -> Result<(PathBuf, String)> {
         let version = if want == "latest" { newest_release(self.repo, None)? } else { want.to_string() };
         let dir = tools.join(format!("{}-{version}", self.id));
-        if let Some(exe) = program(&dir) {
+        if let Some(exe) = program(&dir, self.exe) {
             return Ok((exe, version));
         }
         fs::create_dir_all(&dir)?;
-        let asset = match (OS, ARCH) {
-            ("linux", _) => format!("T3-Code-{version}-amd64.deb"),
-            ("macos", "aarch64") => format!("T3-Code-{version}-arm64.zip"),
-            ("macos", _) => format!("T3-Code-{version}-x64.zip"),
-            _ => format!("T3-Code-{version}-x64.exe"),
-        };
+        let asset = (self.asset)(&version);
         let file = dir.join(&asset);
         let url = format!("https://github.com/{}/releases/download/v{version}/{asset}", self.repo);
         output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&file).arg(&url)).with_context(|| url.clone())?;
@@ -91,7 +126,7 @@ impl App {
             _ => output(Command::new(&file).arg("/S").arg(format!("/D={}", dir.join("app").display())))?,
         };
         fs::remove_file(&file)?;
-        let exe = program(&dir).with_context(|| format!("installed {} {version} but found no program in {}", self.id, dir.display()))?;
+        let exe = program(&dir, self.exe).with_context(|| format!("installed {} {version} but found no program in {}", self.id, dir.display()))?;
         Ok((exe, version))
     }
 }
@@ -242,28 +277,73 @@ fn t3_start(page: &mut Page, project: &Path) -> Result<()> {
     Ok(())
 }
 
-fn drive(page: &mut Page, model: &Model, scenario: &Scenario, project: &Path, restart: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-    t3_start(page, project)?;
-    let composer = "[...document.querySelectorAll('[contenteditable=true]')].find(e => e.getBoundingClientRect().width > 0)";
-    for (i, turn) in scenario.turns.iter().enumerate() {
+/// One turn as a person takes it: reading what came before and typing, hands off while the agent works.
+struct Turns<'a> {
+    model: &'a Model,
+    person: &'a Person,
+    restart: &'a mut dyn FnMut() -> Result<()>,
+}
+
+impl Turns<'_> {
+    fn take(&mut self, i: usize, turn: &scenario::Turn, mut send: impl FnMut(&str) -> Result<()>, page: impl Fn() -> String) -> Result<()> {
         if turn.restart {
+            self.person.busy(false);
             sleep(Duration::from_secs(6));
-            restart()?;
+            (self.restart)()?;
             sleep(Duration::from_secs(4));
         }
-        page.click_at(composer, "the message box")?;
-        model.arm(i);
-        page.type_text(turn.prompt)?;
-        sleep(Duration::from_millis(400));
-        page.key("Enter")?;
+        self.person.busy(true);
+        self.model.arm(i);
+        send(turn.prompt)?;
+        self.person.busy(false);
         let until = Instant::now() + Duration::from_secs(90);
-        while !model.said(i) {
+        while !self.model.said(i) {
             if Instant::now() > until {
-                bail!("turn {} never finished. Page:\n{}", i + 1, page.text()?);
+                bail!("turn {} never finished. Page:\n{}", i + 1, page());
             }
             sleep(Duration::from_millis(200));
         }
+        self.person.busy(true);
         sleep(Duration::from_secs(4));
+        Ok(())
+    }
+}
+
+fn drive(page: &mut Page, scenario: &Scenario, project: &Path, turns: &mut Turns) -> Result<()> {
+    t3_start(page, project)?;
+    let composer = "[...document.querySelectorAll('[contenteditable=true]')].find(e => e.getBoundingClientRect().width > 0)";
+    let page = std::cell::RefCell::new(page);
+    for (i, turn) in scenario.turns.iter().enumerate() {
+        let send = |prompt: &str| -> Result<()> {
+            let mut page = page.borrow_mut();
+            page.click_at(composer, "the message box")?;
+            page.type_text(prompt)?;
+            sleep(Duration::from_millis(400));
+            page.key("Enter")
+        };
+        turns.take(i, turn, send, || page.borrow_mut().text().unwrap_or_default())?;
+    }
+    Ok(())
+}
+
+/// The app is in front once Kairos says so, and the project the link opened has its message box in focus.
+fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns) -> Result<()> {
+    let until = Instant::now() + Duration::from_secs(90);
+    while !crate::events(kd)?.iter().any(|e| e["kind"] == "focus" && e["class"] == "agent_app") {
+        if Instant::now() > until {
+            bail!("the app's window never came to the front");
+        }
+        sleep(Duration::from_millis(500));
+    }
+    sleep(Duration::from_secs(8));
+    let person = turns.person.clone();
+    for (i, turn) in scenario.turns.iter().enumerate() {
+        let send = |prompt: &str| -> Result<()> {
+            person.type_text(prompt)?;
+            sleep(Duration::from_millis(400));
+            person.enter()
+        };
+        turns.take(i, turn, send, String::new)?;
     }
     Ok(())
 }
@@ -280,12 +360,16 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", app.id, scenario.name, p.run.display());
 
+    let person = Person::new(args.window)?;
     let mut daemon = crate::daemon(args, &p)?;
     sleep(Duration::from_secs(2));
     let launch = (h.prepare)(&p.home, &p.project, &url, "latest")?;
     let log = || OpenOptions::new().create(true).append(true).open(p.run.join("app.log"));
     let mut cmd = Command::new(&exe);
-    cmd.arg(format!("--remote-debugging-port={PORT}"));
+    match app.drive {
+        Drive::Page => cmd.arg(format!("--remote-debugging-port={PORT}")),
+        Drive::Keys => cmd.arg(format!("opencode://open-project?directory={}", p.project.display())),
+    };
     if OS == "linux" {
         // An unpacked .deb has no setuid sandbox helper, and Xvfb has no GPU.
         cmd.args(["--no-sandbox", "--disable-gpu"]);
@@ -315,14 +399,27 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         daemon = crate::daemon(args, &p)?;
         Ok(())
     };
-    let drove = Page::open(PORT, Duration::from_secs(90)).and_then(|mut page| {
-        let r = drive(&mut page, &model, &scenario, &p.project, &mut restart);
-        if r.is_err() {
-            let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
-        }
-        r
-    });
+    let mut turns = Turns { model: &model, person: &person, restart: &mut restart };
+    let drove = match app.drive {
+        Drive::Page => Page::open(PORT, Duration::from_secs(90)).and_then(|mut page| {
+            let r = drive(&mut page, &scenario, &p.project, &mut turns);
+            if r.is_err() {
+                let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
+            }
+            r
+        }),
+        Drive::Keys => type_in(&scenario, &p.kd, &mut turns),
+    };
+    // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
+    if drove.is_ok() && args.window {
+        // Still reading the last reply until kairosd writes down the minute.
+        let (from, until) = (crate::now(), Instant::now() + Duration::from_secs(65));
+        while Instant::now() < until && !crate::events(&p.kd)?.iter().any(|e| e["kind"] == "present" && e["ts"].as_f64().is_some_and(|t| t > from)) {
+            sleep(Duration::from_secs(1));
+        }
+    }
+    person.busy(false);
     // Electron's helpers and the harness it started all run from the app's own folder.
     let folder = exe.parent().context("the app has no folder")?;
     if cfg!(windows) {
@@ -332,6 +429,10 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     }
     let _ = child.kill();
     let _ = child.wait();
+    if !launch.after.is_empty() {
+        // The app's server outlives its window, like the CLI's.
+        let _ = Command::new(&cli).args(&launch.after).current_dir(&p.project).env("HOME", &p.home).env("USERPROFILE", &p.home).stdin(Stdio::null()).output();
+    }
     let _ = daemon.kill();
     let _ = daemon.wait();
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
@@ -343,8 +444,16 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
     problems.extend(crate::check(h, None, &scenario, &[], &all, &p.project)?);
+    let mut summary = None;
     if args.window {
         problems.extend(crate::front(&all, h.id, "agent_app", &[]));
+        let (wrong, said) = credit::check(&p.kd, h.id, "proj", &person)?;
+        problems.extend(wrong);
+        summary = Some(said);
     }
-    Ok(crate::report(app.id, &version, &scenario, &crate::kairosd_version(&args.kairosd)?, &mine, &problems))
+    let passed = crate::report(app.id, &version, &scenario, &crate::kairosd_version(&args.kairosd)?, &mine, &problems);
+    if let Some(said) = summary {
+        println!("  {said}");
+    }
+    Ok(passed)
 }
