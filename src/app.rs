@@ -360,6 +360,17 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", app.id, scenario.name, p.run.display());
 
+    // A macOS app finds Application Support from the account, not $HOME, so OpenCode desktop writes its open tabs under
+    // the runner's own home while kairosd, on the run's home, looks in the run's. On a real Mac both are one folder.
+    #[cfg(target_os = "macos")]
+    if app.id == "opencode-desktop" {
+        let support = |home: &Path| home.join("Library").join("Application Support");
+        let own = PathBuf::from(std::env::var_os("HOME").context("no HOME")?);
+        let real = support(own.as_path()).join("ai.opencode.desktop");
+        std::fs::create_dir_all(&real)?;
+        std::fs::create_dir_all(support(p.home.as_path()))?;
+        std::os::unix::fs::symlink(&real, support(p.home.as_path()).join("ai.opencode.desktop"))?;
+    }
     let person = Person::new(args.window)?;
     let mut daemon = crate::daemon(args, &p)?;
     sleep(Duration::from_secs(2));
