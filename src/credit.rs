@@ -35,8 +35,7 @@ fn secs(list: &[Span]) -> f64 {
 /// typing gets credit, in the project, and nothing comes long after they last touched anything while the agent worked.
 /// Only time kairosd could see counts as owed: it writes what it saw once a minute, so the minute before it was
 /// stopped is lost.
-pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result<(Vec<String>, String)> {
-    let mut problems = Vec::new();
+fn read(kd: &Path, problems: &mut Vec<String>) -> Result<Vec<Event>> {
     let mut files: Vec<PathBuf> = fs::read_dir(kd)?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     files.retain(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("events-") && n.ends_with(".jsonl")));
     files.sort();
@@ -50,6 +49,26 @@ pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result
         }
     }
     events.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+    Ok(events)
+}
+
+/// Every piece of credit the rule gives a kairosd folder's events, for looking into a run by hand.
+pub fn show(kd: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    let events = read(kd, &mut problems)?;
+    let first = events.first().map_or(0.0, |e| e.ts);
+    for c in Rule::CURRENT.apply(&events) {
+        println!("+{:7.1} s  {:5.1} s  {:8}  {:?}", c.start - first, c.end - c.start, c.class.as_str(), c.project);
+    }
+    for p in problems {
+        eprintln!("{p}");
+    }
+    Ok(())
+}
+
+pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result<(Vec<String>, String)> {
+    let mut problems = Vec::new();
+    let events = read(kd, &mut problems)?;
     let credits = Rule::CURRENT.apply(&events);
     let credited = union(credits.iter().map(|c| (c.start, c.end)).collect());
 

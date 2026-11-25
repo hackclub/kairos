@@ -389,7 +389,9 @@ fn check(h: &Harness, version: Option<&str>, scenario: &Scenario, esc: &[Option<
             differ(&mut problems, n, "reply_done.files_changed", &d["files_changed"], json!(want.files));
             if let Some(pressed) = esc.get(i).copied().flatten() {
                 let off = d["ts"].as_f64().unwrap_or(0.0) - pressed;
-                if !(-1.5..3.0).contains(&off) {
+                // Otherwise the turn ends at its last step, which came 3 s before Esc, in whole seconds.
+                let fits = if h.writes_esc { (-1.5..3.0).contains(&off) } else { (-5.0..0.5).contains(&off) };
+                if !fits {
                     problems.push(format!("turn {n}: the interrupted reply ended {off:.1} s from when Esc was pressed"));
                 }
             }
@@ -488,9 +490,22 @@ fn keep(p: &Place, stores: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Bugs the lab caught that a later kairosd fixes: number in BUGS.md, first release with the fix, text of the problem.
-/// On an older kairosd they are listed without failing the run, so the nightly stays quiet until the release.
-const KNOWN: &[(u32, &str, &str)] = &[(23, "0.1.20", "project \"inner\""), (23, "0.1.20", "project is \"inner\"")];
+/// A bug the lab caught, listed without failing the run so the nightly stays quiet about it.
+struct Known {
+    /// Its number in BUGS.md.
+    bug: u32,
+    /// Empty for every harness.
+    harness: &'static str,
+    /// The first release with the fix, empty while it is open.
+    fixed: &'static str,
+    /// Text in the problem.
+    text: &'static str,
+}
+
+const KNOWN: &[Known] = &[
+    Known { bug: 23, harness: "", fixed: "0.1.20", text: "\"inner\"" },
+    Known { bug: 29, harness: "antigravity", fixed: "", text: "credit came while nobody had touched anything" },
+];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
     let out = Command::new(kairosd).arg("--version").stdin(Stdio::null()).output().context("kairosd --version")?;
@@ -508,7 +523,9 @@ fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &
     for e in mine {
         println!("{e}");
     }
-    let known = |p: &String| KNOWN.iter().find(|(_, fixed, text)| older(kairosd, fixed) && p.contains(text));
+    let known = |p: &String| {
+        KNOWN.iter().find(|k| (k.harness.is_empty() || k.harness == name) && (k.fixed.is_empty() || older(kairosd, k.fixed)) && p.contains(k.text))
+    };
     let real: Vec<&String> = problems.iter().filter(|p| known(p).is_none()).collect();
     if real.is_empty() {
         println!("PASS {name} {version} {}: {} events match the script", scenario.name, mine.len());
@@ -519,8 +536,10 @@ fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &
         }
     }
     for p in problems {
-        if let Some((bug, fixed, _)) = known(p) {
-            println!("  known bug #{bug} in kairosd {kairosd}, fixed in {fixed}: {p}");
+        match known(p) {
+            Some(k) if k.fixed.is_empty() => println!("  known open bug #{}: {p}", k.bug),
+            Some(k) => println!("  known bug #{} in kairosd {kairosd}, fixed in {}: {p}", k.bug, k.fixed),
+            None => {}
         }
     }
     real.is_empty()
@@ -544,6 +563,10 @@ fn serve(project: &str) -> Result<bool> {
 fn run() -> Result<bool> {
     if std::env::args().nth(1).as_deref() == Some("model") {
         return serve(&std::env::args().nth(2).context("usage: lab model <project folder>")?);
+    }
+    if std::env::args().nth(1).as_deref() == Some("credit") {
+        credit::show(Path::new(&std::env::args().nth(2).context("usage: lab credit <kairosd folder>")?))?;
+        return Ok(true);
     }
     let args = args()?;
     fs::create_dir_all(&args.work)?;

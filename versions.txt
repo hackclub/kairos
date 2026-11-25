@@ -9,4 +9,5 @@ opencode 1.x
 opencode 2.2.5
 opencode 2.4.1
 opencode 2.x
+antigravity latest
 t3code latest

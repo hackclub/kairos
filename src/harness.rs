@@ -24,6 +24,8 @@ pub enum Source {
     Npm(&'static str),
     /// A GitHub repo whose releases carry `<bin>-<os>-<arch>` archives.
     Github(&'static str),
+    /// Google's update server, which only hands out its newest build.
+    Antigravity,
 }
 
 pub struct Harness {
@@ -42,6 +44,8 @@ pub struct Harness {
     /// The first version that writes down the permission prompts it showed and the pastes it put a placeholder for.
     /// Only Claude Code asks before a command outside its allow list, the others run with approvals off.
     pub marks_since: Option<&'static str>,
+    /// It writes down when the person pressed Esc. agy doesn't, so Kairos ends that turn at the last step it saw.
+    pub writes_esc: bool,
     pub prepare: fn(home: &Path, project: &Path, model_url: &str, version: &str) -> Result<Launch>,
 }
 
@@ -73,6 +77,7 @@ pub const ALL: &[Harness] = &[
         ],
         // 2.0 keeps no record of a permission prompt, and puts a 20 line paste in the prompt as it is.
         marks_since: Some("2.1.0"),
+        writes_esc: true,
         prepare: claude,
     },
     Harness {
@@ -86,6 +91,7 @@ pub const ALL: &[Harness] = &[
         ready: &["? for shortcuts"],
         during: &[],
         marks_since: None,
+        writes_esc: true,
         prepare: codex,
     },
     Harness {
@@ -99,9 +105,29 @@ pub const ALL: &[Harness] = &[
         ready: &["ctrl+p commands"],
         during: &[],
         marks_since: None,
+        writes_esc: true,
         prepare: opencode,
     },
+    Harness {
+        id: "antigravity",
+        source: Source::Antigravity,
+        bin: "agy",
+        stores: &[".gemini/antigravity-cli/brain", ".gemini/antigravity-cli/cli.log"],
+        state: &[".gemini"],
+        first_run: &[
+            (&["Choose your color scheme", "[Next]"], &[ENTER]),
+            (&["Terms of Service", "Done"], &[ENTER]),
+            (&["Do you trust the contents of this project?", "> Yes, I trust this folder"], &[ENTER]),
+        ],
+        ready: &["? for shortcuts"],
+        during: &[],
+        marks_since: None,
+        writes_esc: false,
+        prepare: antigravity,
+    },
 ];
+
+const ANTIGRAVITY: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
 
 fn vars(env: &[(&str, &str)]) -> Vec<(String, String)> {
     env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
@@ -153,6 +179,30 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
     fs::write(dir.join("opencode.json"), serde_json::to_string_pretty(&config)?)?;
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
     Ok(Launch { args, resume, env: vars(&[("LAB_KEY", "lab")]), after })
+}
+
+fn antigravity(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+    // Its enterprise gateway mode talks chat completions to any server, with no Google sign-in.
+    let env = [
+        ("AGY_LLM_GATEWAY_URL", model_url),
+        ("AGY_LLM_GATEWAY_API_KEY", "lab"),
+        ("AGY_LLM_GATEWAY_WIRE_PROTOCOL", "openai"),
+        ("AGY_LLM_GATEWAY_MODELS", "lab-model"),
+        ("AGY_CLI_DISABLE_AUTO_UPDATE", "1"),
+    ];
+    let args = vec!["--dangerously-skip-permissions".to_string()];
+    let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
+}
+
+/// Google's manifest of the newest agy for this machine.
+fn antigravity_manifest() -> Result<Value> {
+    let os = match OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let url = format!("{ANTIGRAVITY}/{os}_{}.json", if ARCH == "aarch64" { "arm64" } else { "amd64" });
+    serde_json::from_str(&output(Command::new("curl").args(["-fsSL", "--retry", "3", &url]))?).context("agy's manifest")
 }
 
 pub fn find(id: &str) -> Result<&'static Harness> {
@@ -219,6 +269,7 @@ impl Harness {
                 }
             }
             (Source::Github(repo), _) => newest_release(repo, major)?,
+            (Source::Antigravity, _) => antigravity_manifest()?["version"].as_str().unwrap_or_default().to_string(),
         };
         if version.is_empty() {
             bail!("could not find the newest {} for {want:?}", self.id);
@@ -232,7 +283,7 @@ impl Harness {
         let dir = tools.join(format!("{}-{version}", self.id));
         let bin = match self.source {
             Source::Npm(_) => dir.join("node_modules").join(".bin").join(if cfg!(windows) { format!("{}.cmd", self.bin) } else { self.bin.to_string() }),
-            Source::Github(_) => dir.join(if cfg!(windows) { format!("{}.exe", self.bin) } else { self.bin.to_string() }),
+            Source::Github(_) | Source::Antigravity => dir.join(if cfg!(windows) { format!("{}.exe", self.bin) } else { self.bin.to_string() }),
         };
         if bin.exists() {
             return Ok((bin, version));
@@ -254,6 +305,22 @@ impl Harness {
                 output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(dir.join(&asset)).arg(&url)).with_context(|| url.clone())?;
                 output(Command::new("tar").arg("-xf").arg(dir.join(&asset)).arg("-C").arg(&dir))?;
                 fs::remove_file(dir.join(&asset))?;
+            }
+            Source::Antigravity => {
+                let manifest = antigravity_manifest()?;
+                if manifest["version"] != version.as_str() {
+                    bail!("Google only hands out the newest agy, {}, not {version}", manifest["version"]);
+                }
+                let url = manifest["url"].as_str().context("agy's manifest has no url")?;
+                if url.ends_with(".exe") {
+                    output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&bin).arg(url))?;
+                } else {
+                    let archive = dir.join("agy.tar.gz");
+                    output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&archive).arg(url))?;
+                    output(Command::new("tar").arg("-xzf").arg(&archive).arg("-C").arg(&dir).arg("antigravity"))?;
+                    fs::rename(dir.join("antigravity"), &bin)?;
+                    fs::remove_file(&archive)?;
+                }
             }
         }
         if !bin.exists() {

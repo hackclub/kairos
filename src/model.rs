@@ -251,20 +251,30 @@ fn responses(state: &Mutex<State>, body: &Value) -> (&'static str, String, Strin
     ("text/event-stream", out, note)
 }
 
-/// A chat completions tool call, by the tool and argument names this version offers (1.x says `bash` and `filePath`).
+/// A chat completions tool call, by the tool and argument names this version offers (OpenCode 1.x says `bash` and
+/// `filePath`, agy `run_command` and `Path`).
 fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)> {
     let find = |names: &[&str]| names.iter().find_map(|n| tools.iter().find(|t| t["name"] == *n));
     let key = |tool: &Value, names: &[&str]| names.iter().find(|n| tool["parameters"]["properties"].get(**n).is_some()).map(|n| n.to_string());
-    let (tool, mut args, path) = match act {
-        Act::Write { path, content } => (find(&["write"])?, json!({ "content": content }), Some(path)),
-        Act::Edit { path, old, new } => (find(&["edit"])?, json!({ "oldString": old, "newString": new }), Some(path)),
-        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash"])?, json!({ "command": cmd }), None),
+    let file = |path: &str| json!(project.join(path).to_string_lossy());
+    const PATH: &[&str] = &["path", "filePath", "Path"];
+    let (tool, wants): (&Value, Vec<(&[&str], Value)>) = match act {
+        Act::Write { path, content } => (find(&["write", "write_file"])?, vec![(PATH, file(path)), (&["content", "Content"], json!(content))]),
+        Act::Edit { path, old, new } => (
+            find(&["edit", "edit_file"])?,
+            vec![(PATH, file(path)), (&["oldString", "Target"], json!(old)), (&["newString", "Replacement"], json!(new))],
+        ),
+        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash", "run_command"])?, vec![(&["command", "CommandLine"], json!(cmd))]),
     };
-    if let Some(path) = path {
-        args[key(tool, &["path", "filePath"])?] = json!(project.join(path).to_string_lossy());
+    let mut args = json!({});
+    for (names, value) in wants {
+        args[key(tool, names).unwrap_or_else(|| names[0].to_string())] = value;
     }
-    if key(tool, &["description"]).is_some() {
-        args["description"] = json!("Run the scripted command");
+    // agy turns its command away without a summary and a wait before it goes to the background.
+    for (name, value) in [("description", json!("Run the scripted command")), ("toolSummary", json!("Run the scripted command")), ("WaitMsBeforeAsync", json!(30000))] {
+        if key(tool, &[name]).is_some() {
+            args[name] = value;
+        }
     }
     Some((tool["name"].clone(), args))
 }
