@@ -37,7 +37,7 @@ pub const ALL: &[App] = &[App {
     repo: "pingdotgg/t3code",
     harness: "claude-code",
     state: &[".t3", ".claude", ".claude.json"],
-    stores: &[".claude/projects", ".t3/userdata"],
+    stores: &[".claude/projects", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
 }];
 
 pub fn find(id: &str) -> Option<&'static App> {
@@ -105,12 +105,16 @@ impl Page {
     fn open(port: u16, within: Duration) -> Result<Page> {
         let until = Instant::now() + within;
         loop {
-            let list = Command::new("curl").args(["-fsS", &format!("http://127.0.0.1:{port}/json")]).output();
+            let list = Command::new("curl").args(["-fsS", "-m", "5", &format!("http://127.0.0.1:{port}/json")]).output();
             let page = list.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).and_then(|v| {
                 v.as_array()?.iter().find(|t| t["type"] == "page")?["webSocketDebuggerUrl"].as_str().map(str::to_string)
             });
             if let Some(url) = page {
                 let (ws, _) = tungstenite::connect(url.as_str()).context("the app's debugging port")?;
+                // A page that stops answering fails the run instead of holding the machine.
+                if let MaybeTlsStream::Plain(s) = ws.get_ref() {
+                    s.set_read_timeout(Some(Duration::from_secs(60)))?;
+                }
                 return Ok(Page { ws, next: 0 });
             }
             if Instant::now() > until {
@@ -294,7 +298,10 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         cmd.env(k, v);
     }
     let bin = cli.parent().context("the harness has no folder")?.to_path_buf();
-    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
+    // On Windows an app can't run npm's claude.cmd without a shell. T3 looks for the package next to the shim, the way
+    // a global npm install lays it out, so the program itself goes on PATH first.
+    let native = bin.parent().map(|m| m.join("@anthropic-ai").join("claude-code").join("bin")).filter(|d| cfg!(windows) && d.join("claude.exe").is_file());
+    let path = std::env::join_paths(native.into_iter().chain([bin]).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
     cmd.env("PATH", path);
     let mut child = cmd.spawn().with_context(|| format!("starting {}", exe.display()))?;
 
