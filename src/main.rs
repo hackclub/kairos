@@ -504,7 +504,7 @@ struct Known {
 
 const KNOWN: &[Known] = &[
     Known { bug: 23, harness: "", fixed: "0.1.20", text: "\"inner\"" },
-    Known { bug: 29, harness: "antigravity", fixed: "", text: "credit came while nobody had touched anything" },
+    Known { bug: 29, harness: "antigravity", fixed: "0.1.20", text: "credit came while nobody had touched anything" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "in project null" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "s the person spent reading and typing" },
 ];
