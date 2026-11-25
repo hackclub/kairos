@@ -26,14 +26,12 @@ const PORT: u16 = 9333;
 
 pub struct App {
     pub id: &'static str,
-    repo: &'static str,
+    source: Source,
     /// The harness it runs, which Kairos names in its events.
     harness: &'static str,
     /// What it keeps in the home folder, removed before a run in a real home.
     state: &'static [&'static str],
     stores: &'static [&'static str],
-    /// The release file for this system, from the version.
-    asset: fn(&str) -> String,
     /// The program's file name, where it isn't the one inside a macOS .app.
     exe: fn(&str) -> bool,
     drive: Drive,
@@ -52,9 +50,20 @@ struct Pick {
     off: bool,
 }
 
+enum Source {
+    /// A repo's GitHub releases, with the file for this system from the version.
+    GitHub(&'static str, fn(&str) -> String),
+    /// Google's updater, which hands out only the newest build.
+    Antigravity,
+    /// OpenAI's feed for the Mac and the Windows package, newest only.
+    Codex,
+}
+
 enum Drive {
     /// Over the app's debugging port.
     Page,
+    /// Over the debugging port, in the agent's panel beside the editor.
+    Panel,
     /// The app opens the project from a link and its message box takes the keys.
     Keys,
 }
@@ -79,11 +88,10 @@ fn t3_exe(name: &str) -> bool {
 pub const ALL: &[App] = &[
     App {
         id: "t3code",
-        repo: "pingdotgg/t3code",
+        source: Source::GitHub("pingdotgg/t3code", t3_asset),
         harness: "claude-code",
         state: &[".t3", ".claude", ".claude.json"],
         stores: &[".claude/projects", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
-        asset: t3_asset,
         exe: t3_exe,
         drive: Drive::Page,
         pick: None,
@@ -91,11 +99,10 @@ pub const ALL: &[App] = &[
     // T3 starts `codex app-server` itself, on the same ~/.codex.
     App {
         id: "t3code-codex",
-        repo: "pingdotgg/t3code",
+        source: Source::GitHub("pingdotgg/t3code", t3_asset),
         harness: "codex",
         state: &[".t3", ".codex"],
         stores: &[".codex/sessions", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
-        asset: t3_asset,
         exe: t3_exe,
         drive: Drive::Page,
         pick: Some(Pick { name: "Codex", id: "codex", model: None, off: false }),
@@ -103,11 +110,10 @@ pub const ALL: &[App] = &[
     // T3 starts `opencode serve` itself, on the same config and database.
     App {
         id: "t3code-opencode",
-        repo: "pingdotgg/t3code",
+        source: Source::GitHub("pingdotgg/t3code", t3_asset),
         harness: "opencode",
         state: &[".t3", ".config/opencode", ".local/share/opencode", ".local/state/opencode"],
         stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
-        asset: t3_asset,
         exe: t3_exe,
         drive: Drive::Page,
         pick: Some(Pick { name: "OpenCode", id: "opencode", model: Some("test-model"), off: true }),
@@ -116,18 +122,39 @@ pub const ALL: &[App] = &[
     // isn't under the run's home.
     App {
         id: "opencode-desktop",
-        repo: "anomalyco/opencode",
-        harness: "opencode",
-        state: &[".config/opencode", ".config/ai.opencode.desktop", ".local/share/opencode", ".local/state/opencode"],
-        stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".config/ai.opencode.desktop/drafts.sqlite", ".config/ai.opencode.desktop/opencode.settings"],
-        asset: |_| match (OS, ARCH) {
+        source: Source::GitHub("anomalyco/opencode", |_| match (OS, ARCH) {
             ("linux", _) => "opencode-desktop-linux-amd64.deb".to_string(),
             ("macos", "aarch64") => "opencode-desktop-mac-arm64.zip".to_string(),
             ("macos", _) => "opencode-desktop-mac-x64.zip".to_string(),
             _ => "opencode-desktop-win-x64.exe".to_string(),
-        },
+        }),
+        harness: "opencode",
+        state: &[".config/opencode", ".config/ai.opencode.desktop", ".local/share/opencode", ".local/state/opencode"],
+        stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".config/ai.opencode.desktop/drafts.sqlite", ".config/ai.opencode.desktop/opencode.settings"],
         exe: |name| if OS == "linux" { name == "ai.opencode" } else { name == "OpenCode.exe" },
         drive: Drive::Keys,
+        pick: None,
+    },
+    // OpenAI's Codex app, now called ChatGPT. It runs the codex inside it, on the same ~/.codex.
+    App {
+        id: "codex-app",
+        source: Source::Codex,
+        harness: "codex",
+        state: &[".codex"],
+        stores: &[".codex/sessions", ".codex/log"],
+        exe: |name| name == "ChatGPT.exe",
+        drive: Drive::Page,
+        pick: None,
+    },
+    // The editor with Google's agent in a side panel, which runs agy from ~/.gemini/bin.
+    App {
+        id: "antigravity-ide",
+        source: Source::Antigravity,
+        harness: "antigravity",
+        state: &[".gemini", ".antigravity-ide", ".config/Antigravity IDE"],
+        stores: &[".gemini/antigravity/brain", ".gemini/antigravity/conversation_summaries.db", ".gemini/antigravity/cli.log", ".gemini/antigravity/log", ".gemini/config"],
+        exe: |name| name == "antigravity-ide" || name == "Antigravity IDE.exe",
+        drive: Drive::Panel,
         pick: None,
     },
 ];
@@ -159,27 +186,90 @@ fn program(dir: &Path, fits: fn(&str) -> bool) -> Option<PathBuf> {
 
 impl App {
     fn install(&self, want: &str, tools: &Path) -> Result<(PathBuf, String)> {
-        let version = if want == "latest" { newest_release(self.repo, None)? } else { want.to_string() };
+        let (version, url) = match self.source {
+            Source::GitHub(repo, asset) => {
+                let version = if want == "latest" { newest_release(repo, None)? } else { want.to_string() };
+                let url = format!("https://github.com/{repo}/releases/download/v{version}/{}", asset(&version));
+                (version, url)
+            }
+            Source::Antigravity => antigravity_ide(want)?,
+            Source::Codex => codex_app(want)?,
+        };
         let dir = tools.join(format!("{}-{version}", self.id));
         if let Some(exe) = program(&dir, self.exe) {
             return Ok((exe, version));
         }
         fs::create_dir_all(&dir)?;
-        let asset = (self.asset)(&version);
-        let file = dir.join(&asset);
-        let url = format!("https://github.com/{}/releases/download/v{version}/{asset}", self.repo);
+        let file = dir.join(url.rsplit('/').next().unwrap_or_default().replace("%20", "-"));
         output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&file).arg(&url)).with_context(|| url.clone())?;
+        let name = file.to_string_lossy().to_string();
+        let into = dir.join("app");
         match OS {
+            _ if name.ends_with(".tar.gz") => output(Command::new("tar").arg("-xzf").arg(&file).arg("-C").arg(&dir))?,
+            // A package is a zip. Windows' own tar reads zips, the one Git brings doesn't.
+            _ if name.ends_with(".msix") => {
+                fs::create_dir_all(&into)?;
+                output(Command::new(r"C:\Windows\System32\tar.exe").arg("-xf").arg(&file).arg("-C").arg(&into))?
+            }
             "linux" => output(Command::new("dpkg-deb").arg("-x").arg(&file).arg(&dir))?,
             // ditto keeps the links inside the app's frameworks.
             "macos" => output(Command::new("ditto").args(["-x", "-k"]).arg(&file).arg(&dir))?,
+            // VS Code's Inno Setup installer, which would start the editor when done unless told not to.
+            _ if matches!(self.source, Source::Antigravity) => output(
+                Command::new(&file).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/MERGETASKS=!runcode"]).arg(format!("/DIR={}", into.display())),
+            )?,
             // The installer, silent and into the folder named last.
-            _ => output(Command::new(&file).arg("/S").arg(format!("/D={}", dir.join("app").display())))?,
+            _ => output(Command::new(&file).arg("/S").arg(format!("/D={}", into.display())))?,
         };
         fs::remove_file(&file)?;
         let exe = program(&dir, self.exe).with_context(|| format!("installed {} {version} but found no program in {}", self.id, dir.display()))?;
         Ok((exe, version))
     }
+}
+
+/// The newest Antigravity IDE and where to get it. The updater names no version, its download folder does.
+fn antigravity_ide(want: &str) -> Result<(String, String)> {
+    let system = match (OS, ARCH) {
+        ("linux", _) => "linux-x64",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", _) => "darwin",
+        _ => "win32-x64-user",
+    };
+    let api = format!("https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/api/update/{system}/stable/latest");
+    let latest: Value = serde_json::from_str(&output(Command::new("curl").args(["-fsSL", "--retry", "3", &api]))?).context("the updater's answer")?;
+    let url = latest["url"].as_str().context("the updater gave no url")?.replace(' ', "%20");
+    let version = url.split("/stable/").nth(1).and_then(|r| r.split(['-', '/']).next()).context("no version in the download's url")?.to_string();
+    if want != "latest" && want != version {
+        bail!("Google only hands out the newest Antigravity IDE, {version}, not {want}");
+    }
+    Ok((version, url))
+}
+
+/// The newest Codex app. Only the Mac's feed names versions.
+fn codex_app(want: &str) -> Result<(String, String)> {
+    let (version, url) = if OS == "macos" {
+        let feed = output(Command::new("curl").args(["-fsSL", "--retry", "3", "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"]))?;
+        let url = feed.split("<enclosure url=\"").nth(1).and_then(|r| r.split('"').next()).context("no download in the Codex app's feed")?;
+        let version = url.rsplit('-').next().and_then(|v| v.strip_suffix(".zip")).context("no version in the Codex app's download")?;
+        (version.to_string(), url.to_string())
+    } else {
+        ("latest".to_string(), format!("https://persistent.oaistatic.com/codex-app-prod/ChatGPT-{}.msix", if ARCH == "aarch64" { "arm64" } else { "x64" }))
+    };
+    if want != "latest" && want != version {
+        bail!("OpenAI only hands out the newest Codex app, {version}, not {want}");
+    }
+    Ok((version, url))
+}
+
+/// The Codex app's first run, which the lab doesn't know yet: what it shows after a while.
+fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
+    sleep(Duration::from_secs(40));
+    if let Ok(shot) = page.call("Page.captureScreenshot", json!({ "format": "png" })) {
+        fs::write(run.join("shot.b64"), shot["data"].as_str().unwrap_or_default())?;
+    }
+    let targets = Command::new("curl").args(["-fsS", "-m", "5", &format!("http://127.0.0.1:{PORT}/json")]).output()?;
+    fs::write(run.join("targets.json"), targets.stdout)?;
+    bail!("the lab can't drive the Codex app yet. Page:\n{}", page.text()?)
 }
 
 struct Page {
@@ -189,11 +279,16 @@ struct Page {
 
 impl Page {
     fn open(port: u16, within: Duration) -> Result<Page> {
+        Page::open_where(port, within, |t| t["type"] == "page")
+    }
+
+    /// The first of the app's pages and frames that `fits`.
+    fn open_where(port: u16, within: Duration, fits: impl Fn(&Value) -> bool) -> Result<Page> {
         let until = Instant::now() + within;
         loop {
             let list = Command::new("curl").args(["-fsS", "-m", "5", &format!("http://127.0.0.1:{port}/json")]).output();
             let page = list.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).and_then(|v| {
-                v.as_array()?.iter().find(|t| t["type"] == "page")?["webSocketDebuggerUrl"].as_str().map(str::to_string)
+                v.as_array()?.iter().find(|t| fits(t))?["webSocketDebuggerUrl"].as_str().map(str::to_string)
             });
             if let Some(url) = page {
                 let (ws, _) = tungstenite::connect(url.as_str()).context("the app's debugging port")?;
@@ -411,8 +506,47 @@ impl Turns<'_> {
     }
 }
 
-fn drive(page: &mut Page, scenario: &Scenario, project: &Path, pick: Option<&Pick>, turns: &mut Turns) -> Result<()> {
-    t3_start(page, project, pick)?;
+/// The Antigravity IDE's first run: a welcome over the editor and the agent's terms in its panel, then its message box.
+fn antigravity_start(port: u16) -> Result<Page> {
+    let mut editor = Page::open(port, Duration::from_secs(90))?;
+    let welcome = "document.querySelector('.antigravity-ide-welcome-button')";
+    let until = Instant::now() + Duration::from_secs(60);
+    while editor.eval(&format!("!!{welcome}"))? != json!(true) {
+        if Instant::now() > until {
+            bail!("the editor never welcomed. Page:\n{}", editor.text()?);
+        }
+        sleep(Duration::from_millis(500));
+    }
+    editor.click_at(welcome, "Get Started")?;
+    // The panel is a page of agy's own, framed in the editor. Its settings come up in a frame like it.
+    let mut panel = Page::open_where(port, Duration::from_secs(90), |t| {
+        t["url"].as_str().is_some_and(|u| u.contains("/?extensionView=true"))
+    })?;
+    if panel.wait_for(&["Get started", "Ask anything"], Duration::from_secs(90))?.contains("Get started") {
+        panel.press("Get started", "Ask anything")?;
+    }
+    sleep(Duration::from_secs(2));
+    Ok(panel)
+}
+
+/// A person who lets the agent run commands on its own picks Always Proceed. Its default runs them in a sandbox,
+/// which needs a kernel the lab's machines don't all have. agy itself comes with the editor's first run.
+fn antigravity_setup(home: &Path, agy: &Path) -> Result<()> {
+    let bin = home.join(".gemini").join("bin");
+    fs::create_dir_all(&bin)?;
+    fs::copy(agy, bin.join(agy.file_name().context("agy has no name")?))?;
+    let config = home.join(".gemini").join("config");
+    fs::create_dir_all(&config)?;
+    let settings = json!({ "userSettings": {
+        "enableTerminalSandbox": false,
+        "permissionPreset": "AGENT_PERMISSION_PRESET_TURBO",
+        "autoExecutionPolicy": "CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",
+    } });
+    fs::write(config.join("config.json"), serde_json::to_string_pretty(&settings)?)?;
+    Ok(())
+}
+
+fn drive(page: &mut Page, scenario: &Scenario, turns: &mut Turns) -> Result<()> {
     let composer = "[...document.querySelectorAll('[contenteditable=true]')].find(e => e.getBoundingClientRect().width > 0)";
     let page = std::cell::RefCell::new(page);
     for (i, turn) in scenario.turns.iter().enumerate() {
@@ -451,6 +585,10 @@ fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns) -> Result<()> {
 }
 
 pub fn run(app: &App, args: &Args) -> Result<bool> {
+    if matches!(app.source, Source::Codex) && OS == "linux" {
+        println!("SKIP {}: no Linux build", app.id);
+        return Ok(true);
+    }
     let tools = std::path::absolute(&args.work)?.join("tools");
     let (exe, version) = app.install(&args.version, &tools)?;
     let h = harness::find(app.harness)?;
@@ -481,8 +619,13 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let mut cmd = Command::new(&exe);
     match app.drive {
         Drive::Page => cmd.arg(format!("--remote-debugging-port={PORT}")),
+        // The project the way `antigravity-ide .` opens it. Basic keeps Linux from asking which keyring to use.
+        Drive::Panel => cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project),
         Drive::Keys => cmd.arg(format!("opencode://open-project?directory={}", p.project.display())),
     };
+    if app.id == "antigravity-ide" {
+        antigravity_setup(&p.home, &cli)?;
+    }
     if OS == "linux" {
         // An unpacked .deb has no setuid sandbox helper, and Xvfb has no GPU.
         cmd.args(["--no-sandbox", "--disable-gpu"]);
@@ -514,9 +657,20 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         Ok(())
     };
     let mut turns = Turns { model: &model, person: &person, restart: &mut restart };
+    let start = |page: &mut Page| match app.source {
+        Source::Codex => codex_start(page, &p.run),
+        _ => t3_start(page, &p.project, app.pick.as_ref()),
+    };
     let drove = match app.drive {
         Drive::Page => Page::open(PORT, Duration::from_secs(90)).and_then(|mut page| {
-            let r = drive(&mut page, &scenario, &p.project, app.pick.as_ref(), &mut turns);
+            let r = start(&mut page).and_then(|()| drive(&mut page, &scenario, &mut turns));
+            if r.is_err() {
+                let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
+            }
+            r
+        }),
+        Drive::Panel => antigravity_start(PORT).and_then(|mut page| {
+            let r = drive(&mut page, &scenario, &mut turns);
             if r.is_err() {
                 let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
             }
@@ -540,8 +694,9 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).output();
     } else {
         let _ = Command::new("pkill").arg("-f").arg(folder).status();
-        // The agent's server the app started from the harness's own folder.
+        // The agent's server the app started from the harness's own folder, or agy from the run's home.
         let _ = Command::new("pkill").arg("-f").arg(&bin_dir).status();
+        let _ = Command::new("pkill").arg("-f").arg(p.home.join(".gemini").join("bin")).status();
     }
     let _ = child.kill();
     let _ = child.wait();

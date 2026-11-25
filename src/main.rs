@@ -507,7 +507,7 @@ const KNOWN: &[Known] = &[
     Known { bug: 29, harness: "antigravity", fixed: "0.1.20", text: "credit came while nobody had touched anything" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "in project null" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "s the person spent reading and typing" },
-    Known { bug: 31, harness: "t3code-opencode", fixed: "0.1.21", text: "Kairos saw 6 prompts, the lab typed 5" },
+    Known { bug: 32, harness: "t3code-opencode", fixed: "0.1.21", text: "Kairos saw 6 prompts, the lab typed 5" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {

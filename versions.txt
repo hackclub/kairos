@@ -14,3 +14,5 @@ opencode-desktop latest
 t3code latest
 t3code-codex latest
 t3code-opencode latest
+codex-app latest
+antigravity-ide latest

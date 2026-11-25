@@ -14,7 +14,7 @@ while read -r harness version; do
   # ONLY in lab.yml picks some lines, for trying one thing.
   [ -n "${ONLY:-}" ] && ! grep -qE "$ONLY" <<< "$harness $version" && continue
   "./target/release/lab$exe" run "$harness" "$version" --kairosd "dist/$target/kairosd$exe" "$@" > out.txt 2>&1 || failed=1
-  if grep -E "^(PASS|FAIL|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
+  if grep -E "^(PASS|FAIL|SKIP|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
   cat part.txt >> result.txt
   rm -rf work/tools
 done < <(tr -d '\r' < versions.txt)
