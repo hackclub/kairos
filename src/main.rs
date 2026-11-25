@@ -485,7 +485,25 @@ fn report(name: &str, version: &str, scenario: &Scenario, mine: &[Value], proble
     }
 }
 
+/// Only the scripted model, for driving a harness by hand: each turn is armed once the one before has its answer.
+fn serve(project: &str) -> Result<bool> {
+    let scenario = Arc::new(scenario::basic());
+    let model = Model::start(scenario.clone(), std::path::absolute(project)?)?;
+    println!("{}", model.port);
+    for i in 0..scenario.turns.len() {
+        model.arm(i);
+        while !model.said(i) && !model.stalled(i) {
+            sleep(Duration::from_millis(200));
+        }
+        eprintln!("lab: turn {} answered", i + 1);
+    }
+    Ok(true)
+}
+
 fn run() -> Result<bool> {
+    if std::env::args().nth(1).as_deref() == Some("model") {
+        return serve(&std::env::args().nth(2).context("usage: lab model <project folder>")?);
+    }
     let args = args()?;
     fs::create_dir_all(&args.work)?;
     if let Some(app) = app::find(&args.harness) {
