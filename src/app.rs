@@ -210,6 +210,10 @@ impl App {
             _ if name.ends_with(".msix") => {
                 let add = format!("Add-AppxPackage -Path '{}'; (Get-AppxPackage -Name OpenAI.Codex).InstallLocation", file.display());
                 let at = output(Command::new("powershell").args(["-NoProfile", "-Command", &add]))?;
+                let look = "$p = Get-AppxPackage -Name OpenAI.Codex; $p.PackageFamilyName; (Get-AppxPackageManifest $p).OuterXml";
+                if let Ok(manifest) = output(Command::new("powershell").args(["-NoProfile", "-Command", look])) {
+                    let _ = fs::write(tools.parent().unwrap_or(tools).join("codex-manifest.txt"), manifest);
+                }
                 fs::remove_file(&file)?;
                 let exe = PathBuf::from(at.trim()).join("app").join("ChatGPT.exe");
                 if !exe.is_file() {
@@ -285,9 +289,10 @@ fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
             did.push("Engineering");
             sleep(Duration::from_secs(1));
         }
-        let ways = ["Go to ChatGPT", "Skip", "Continue", "Codex"];
-        let roles = ["button", "link", "tab", "menuitem", "radio"];
-        if let Some(name) = ways.into_iter().find(|n| has(&roles, n) && !(*n == "Codex" && log.contains("Codex"))) {
+        let ways = ["Go to ChatGPT", "Skip", "Continue", "Continue without administrator access", "Choose project", "proj"];
+        let roles = ["button", "link", "tab", "menuitem", "menuitemradio", "option", "radio"];
+        let once = ["Choose project", "proj"];
+        if let Some(name) = ways.into_iter().find(|n| has(&roles, n) && !(once.contains(n) && log.contains(*n))) {
             page.ax_click(&roles, name)?;
             did.push(name);
         }
