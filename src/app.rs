@@ -129,7 +129,7 @@ impl Page {
         let id = self.next;
         self.ws.send(Message::Text(json!({ "id": id, "method": method, "params": params }).to_string()))?;
         loop {
-            if let Message::Text(t) = self.ws.read()? {
+            if let Message::Text(t) = self.ws.read().with_context(|| format!("the app never answered {method}"))? {
                 let v: Value = serde_json::from_str(&t)?;
                 if v["id"] == id {
                     if let Some(e) = v.get("error") {
@@ -289,6 +289,10 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     if OS == "linux" {
         // An unpacked .deb has no setuid sandbox helper, and Xvfb has no GPU.
         cmd.args(["--no-sandbox", "--disable-gpu"]);
+    }
+    if OS == "macos" {
+        // The run's own home has no keychain, and the app's main process waits on a keychain dialog nobody answers.
+        cmd.arg("--use-mock-keychain");
     }
     cmd.current_dir(&p.project).env("HOME", &p.home).env("USERPROFILE", &p.home).stdin(Stdio::null()).stdout(log()?).stderr(log()?);
     for k in STRAY_ENV {

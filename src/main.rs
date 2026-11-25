@@ -506,6 +506,12 @@ fn run() -> Result<bool> {
     }
     let args = args()?;
     fs::create_dir_all(&args.work)?;
+    // A run takes a few minutes. One that hangs fails by itself instead of taking the machine's whole report with it.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(15 * 60));
+        eprintln!("lab: still running after 15 minutes, gave up");
+        std::process::exit(2);
+    });
     if let Some(app) = app::find(&args.harness) {
         return app::run(app, &args);
     }
