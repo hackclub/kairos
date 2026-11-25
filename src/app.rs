@@ -225,9 +225,9 @@ impl Page {
 
 /// T3 Code's first run: a welcome page, then a project from a folder on disk, then a thread's message box.
 fn t3_start(page: &mut Page, project: &Path) -> Result<()> {
-    if page.wait_for(&["Add project", "Welcome to T3 Code"], Duration::from_secs(90))?.contains("Welcome to T3 Code") {
-        page.press("Start", "Add project")?;
-    }
+    // Each run starts from a fresh home, so the welcome page always comes, sometimes a moment after the app's frame.
+    page.wait_for(&["Welcome to T3 Code"], Duration::from_secs(90))?;
+    page.press("Start", "Add project")?;
     page.press("Add project", "Local folder")?;
     page.press("Local folder", "Directories")?;
     sleep(Duration::from_secs(1));
