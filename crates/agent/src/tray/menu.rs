@@ -9,8 +9,6 @@ pub enum Action {
     SignIn,
     Pause(Pause),
     Resume,
-    Extension,
-    Quit,
 }
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -23,8 +21,6 @@ impl Action {
             Action::Pause(Pause::Hour) => "pause-1h",
             Action::Pause(Pause::Tomorrow) => "pause-tomorrow",
             Action::Resume => "resume",
-            Action::Extension => "extension",
-            Action::Quit => "quit",
         }
     }
 
@@ -36,8 +32,6 @@ impl Action {
             "pause-1h" => Action::Pause(Pause::Hour),
             "pause-tomorrow" => Action::Pause(Pause::Tomorrow),
             "resume" => Action::Resume,
-            "extension" => Action::Extension,
-            "quit" => Action::Quit,
             _ => return None,
         })
     }
@@ -76,14 +70,9 @@ fn model_in<Tz: TimeZone>(s: &Status, now: f64, tz: &Tz) -> Vec<Item> {
     items.push(Item::Separator);
     items.push(Item::Entry(Action::Pause(Pause::HalfHour), "Pause for 30 minutes".into()));
     items.push(Item::Entry(Action::Pause(Pause::Hour), "Pause for 1 hour".into()));
-    items.push(Item::Entry(Action::Pause(Pause::Tomorrow), "Pause until tomorrow".into()));
     if paused {
         items.push(Item::Entry(Action::Resume, "Resume tracking".into()));
     }
-    items.push(Item::Separator);
-    items.push(Item::Entry(Action::Extension, "Get the browser extension".into()));
-    items.push(Item::Separator);
-    items.push(Item::Entry(Action::Quit, "Quit Kairos".into()));
     items
 }
 
@@ -182,9 +171,6 @@ mod tests {
                 "Open dashboard",
                 "Pause for 30 minutes",
                 "Pause for 1 hour",
-                "Pause until tomorrow",
-                "Get the browser extension",
-                "Quit Kairos",
             ]
         );
         assert!(matches!(items[0], Item::Label(_)));
@@ -289,7 +275,7 @@ mod tests {
         let mut items = model(&Status { paused_until: Some(NOW + 60.0), ..Status::default() });
         items.extend(model(&signed_in()));
         let actions: Vec<_> = items.iter().filter_map(|i| if let Item::Entry(a, _) = i { Some(*a) } else { None }).collect();
-        assert_eq!(actions.len(), 14);
+        assert_eq!(actions.len(), 8);
         for a in actions {
             assert_eq!(Action::from_id(a.id()), Some(a));
         }

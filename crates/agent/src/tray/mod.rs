@@ -62,14 +62,12 @@ impl Controller {
     pub fn act(self: &Arc<Self>, action: Action) {
         match action {
             Action::OpenDashboard => open::url(&format!("{}/me", self.server())),
-            Action::Extension => open::url(&format!("{}/extension", self.server())),
             Action::SignIn => self.sign_in(),
             Action::Pause(p) => match p.until(&Local::now()) {
                 Some(until) => self.send(Msg::Pause(until)),
                 None => diag!("kairosd: could not work out when to end the pause"),
             },
             Action::Resume => self.send(Msg::Resume),
-            Action::Quit => std::process::exit(0),
         }
     }
 
