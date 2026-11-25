@@ -206,6 +206,14 @@ impl Schema {
         rows.collect()
     }
 
+    // T3 Code names a thread or writes a commit message in a session of its own, titled "T3 Code generate...", which
+    // it deletes when done. None of it was typed. False where the table has no title column.
+    fn side_job(self, c: &Connection, sid: &str) -> bool {
+        let table = if self == Schema::Legacy { "session" } else { "session_v2" };
+        let title: Option<String> = c.query_row(&format!("SELECT title FROM {table} WHERE id = ?1"), [sid], |r| r.get(0)).ok().flatten();
+        title.is_some_and(|t| t.strip_prefix("T3 Code ").is_some_and(|op| op.starts_with("generate")))
+    }
+
     // None where the table has no version column (older builds, forks).
     fn version(self, c: &Connection, sid: &str) -> Option<String> {
         let table = if self == Schema::Legacy { "session" } else { "session_v2" };
@@ -555,6 +563,9 @@ impl OpenCode {
     fn scan(&mut self, c: &Connection, schema: Schema, since: i64, out: &mut Vec<Found>) -> rusqlite::Result<()> {
         let (_, updated) = schema.baseline(c)?;
         for (sid, dir, child) in schema.touched(c, self.cursor)? {
+            if schema.side_job(c, &sid) {
+                continue;
+            }
             let cwd = dir.map(PathBuf::from);
             if !child {
                 let from = self.progress.get(&sid).map_or(since, |p| p.u.max(since));
@@ -949,6 +960,34 @@ mod tests {
         db.user("child", "c1", 2_002_000, "look into the parser module");
         db.assistant("child", "c2", 2_002_100, Some((2_003_000, "stop")));
         assert!(src.poll().is_empty());
+    }
+
+    #[test]
+    fn t3_codes_own_jobs_are_not_prompts() {
+        for v2 in [false, true] {
+            let db = Db::new(&format!("t3-{v2}"), v2);
+            let table = if v2 { "session_v2" } else { "session" };
+            db.c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN title TEXT")).unwrap();
+            history(&db);
+            let mut src = OpenCode::new(db.path.clone());
+            assert!(src.poll().is_empty());
+            db.session("job", None);
+            db.c.execute(&format!("UPDATE {table} SET title = 'T3 Code generateThreadTitle' WHERE id = 'job'"), []).unwrap();
+            db.user("job", "j1", 2_000_000, "Write a short title for this thread. User message: please write a small hello program");
+            db.assistant("job", "j2", 2_000_100, Some((2_001_000, "stop")));
+            db.session("thread", None);
+            db.c.execute(&format!("UPDATE {table} SET title = 'T3 Code thread' WHERE id = 'thread'"), []).unwrap();
+            db.user("thread", "t1", 2_002_000, "please write a small hello program in python");
+            let out = src.poll();
+            let prompts: Vec<&str> = out
+                .iter()
+                .filter_map(|f| match &f.kind {
+                    Kind::Prompt { session, .. } => Some(session.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(prompts, ["thread"], "v2 {v2}");
+        }
     }
 
     impl Db {
