@@ -127,20 +127,23 @@ fn typed(root: &Path, ts: f64) -> bool {
     })
 }
 
-// Each run logs "Language server version: X" near its top: the CLI to cli.log (a link to its newest run's log), the app
-// to language_server.log in its settings folder. That is the version running when the prompt is read, the prompt's own
-// unless it waited in the transcript for kairosd to start.
+// Each run logs "Language server version: X" near its top to cli.log (a link to its newest run's log). The apps run agy
+// too since 2.x; before that the app logged to language_server.log in its settings folder. That is the version running
+// when the prompt is read, the prompt's own unless it waited in the transcript for kairosd to start.
 fn version(root: &Path) -> Option<String> {
     const MARK: &str = "Language server version: ";
-    let log = match root.file_name()?.to_str()? {
-        "antigravity-cli" => root.join("cli.log"),
-        "antigravity" => dirs::config_dir()?.join("Antigravity/logs/language_server.log"),
+    let mut logs = vec![root.join("cli.log")];
+    match root.file_name()?.to_str()? {
+        "antigravity-cli" => {}
+        "antigravity" => logs.extend(dirs::config_dir().map(|c| c.join("Antigravity/logs/language_server.log"))),
         _ => return None,
-    };
-    let mut head = Vec::new();
-    fs::File::open(log).ok()?.take(4096).read_to_end(&mut head).ok()?;
-    let text = String::from_utf8_lossy(&head);
-    text[text.find(MARK)? + MARK.len()..].split_whitespace().next().map(str::to_string)
+    }
+    logs.into_iter().find_map(|log| {
+        let mut head = Vec::new();
+        fs::File::open(log).ok()?.take(4096).read_to_end(&mut head).ok()?;
+        let text = String::from_utf8_lossy(&head);
+        text[text.find(MARK)? + MARK.len()..].split_whitespace().next().map(str::to_string)
+    })
 }
 
 #[derive(Default)]
@@ -592,6 +595,16 @@ mod tests {
     fn write(p: &Path, text: &str) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, text).unwrap();
+    }
+
+    #[test]
+    fn the_ide_reads_its_version_from_agys_log() {
+        let dir = std::env::temp_dir().join(format!("kairos-agy-version-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("antigravity");
+        write(&root.join("cli.log"), "Log file created at: 2026/11/25 20:06:29\nI1125 20:06:29.120000      12 server.go:2711] Language server version: 2.35.1\n");
+        assert_eq!(version(&root).as_deref(), Some("2.35.1"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
