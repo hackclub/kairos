@@ -111,7 +111,7 @@ fn claude(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Resu
     let dir = home.join(".claude");
     fs::create_dir_all(&dir)?;
     // Auto mode needs Anthropic's own servers, so the lab runs in accept edits and allows the scripted git commands.
-    let settings = json!({ "permissions": { "defaultMode": "acceptEdits", "allow": ["Bash(git add:*)", "Bash(git commit:*)"] } });
+    let settings = json!({ "permissions": { "defaultMode": "acceptEdits", "allow": ["Bash(git add:*)", "Bash(git commit:*)", "Bash(git init:*)", "Bash(cd:*)"] } });
     fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
     let env = [
         ("ANTHROPIC_BASE_URL", model_url),

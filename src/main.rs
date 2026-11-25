@@ -342,7 +342,10 @@ fn check(h: &Harness, version: Option<&str>, scenario: &Scenario, esc: &[Option<
         if let Some(v) = version {
             differ(&mut problems, n, "prompt.version", &prompt["version"], json!(v));
         }
-        differ(&mut problems, n, "the project", &prompt["project"], json!("proj"));
+        for e in got {
+            differ(&mut problems, n, &format!("{}.project", e["kind"].as_str().unwrap_or("?")), &e["project"], json!("proj"));
+        }
+        problems.dedup();
         differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
         let edits: Vec<Value> = of("agent_edit").iter().map(|e| json!([e["path"], e["added"], e["removed"]])).collect();
         differ(&mut problems, n, "agent edits [path, added, removed]", &json!(edits), json!(want.edits));
@@ -471,18 +474,42 @@ fn keep(p: &Place, stores: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn report(name: &str, version: &str, scenario: &Scenario, mine: &[Value], problems: &[String]) {
+/// Bugs the lab caught that a later kairosd fixes: number in BUGS.md, first release with the fix, text of the problem.
+/// On an older kairosd they are listed without failing the run, so the nightly stays quiet until the release.
+const KNOWN: &[(u32, &str, &str)] = &[(23, "0.1.20", "project is \"inner\"")];
+
+fn kairosd_version(kairosd: &Path) -> Result<String> {
+    let out = Command::new(kairosd).arg("--version").stdin(Stdio::null()).output().context("kairosd --version")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().nth(1).map(str::to_string).context("kairosd --version gave no version")
+}
+
+fn older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    parts(a) < parts(b)
+}
+
+/// True when nothing but known bugs went wrong.
+fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &[Value], problems: &[String]) -> bool {
     for e in mine {
         println!("{e}");
     }
-    if problems.is_empty() {
+    let known = |p: &String| KNOWN.iter().find(|(_, fixed, text)| older(kairosd, fixed) && p.contains(text));
+    let real: Vec<&String> = problems.iter().filter(|p| known(p).is_none()).collect();
+    if real.is_empty() {
         println!("PASS {name} {version} {}: {} events match the script", scenario.name, mine.len());
     } else {
         println!("FAIL {name} {version} {}:", scenario.name);
-        for p in problems {
+        for p in &real {
             println!("  {p}");
         }
     }
+    for p in problems {
+        if let Some((bug, fixed, _)) = known(p) {
+            println!("  known bug #{bug} in kairosd {kairosd}, fixed in {fixed}: {p}");
+        }
+    }
+    real.is_empty()
 }
 
 /// Only the scripted model, for driving a harness by hand: each turn is armed once the one before has its answer.
@@ -592,7 +619,7 @@ fn run() -> Result<bool> {
     if args.window {
         problems.extend(front(&all, h.id, "agent_terminal", &done.closed));
     }
-    report(h.id, &version, &scenario, &mine, &problems);
+    let passed = report(h.id, &version, &scenario, &kairosd_version(&args.kairosd)?, &mine, &problems);
     if let (Some(save), true) = (&args.save, problems.is_empty()) {
         let dir = save.join(h.id).join(&version).join(scenario.name);
         if dir.exists() {
@@ -610,5 +637,5 @@ fn run() -> Result<bool> {
         fs::write(dir.join("run.json"), serde_json::to_string_pretty(&about)?)?;
         println!("saved the sample to {}", dir.display());
     }
-    Ok(problems.is_empty())
+    Ok(passed)
 }

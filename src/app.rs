@@ -346,6 +346,5 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     if args.window {
         problems.extend(crate::front(&all, h.id, "agent_app", &[]));
     }
-    crate::report(app.id, &version, &scenario, &mine, &problems);
-    Ok(problems.is_empty())
+    Ok(crate::report(app.id, &version, &scenario, &crate::kairosd_version(&args.kairosd)?, &mine, &problems))
 }

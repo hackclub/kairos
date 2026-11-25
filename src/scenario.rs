@@ -165,6 +165,13 @@ pub fn basic() -> Scenario {
                 say: "Tagged it lab-1.",
                 ..Turn::default()
             },
+            // Claude Code's shell keeps the `cd` and its log follows it, the window stays on the folder it started in.
+            Turn {
+                prompt: "make an empty repo called inner in here and work from inside it",
+                acts: vec![Act::Shell { cmd: "git init -q inner" }, Act::Shell { cmd: "cd inner" }],
+                say: "Made inner and moved into it.",
+                ..Turn::default()
+            },
             Turn {
                 prompt: "now say hi instead of hello everywhere",
                 acts: vec![Act::Edit { path: "hello.py", old: "    return \"hello \" + name", new: "    return \"hi \" + name" }],
