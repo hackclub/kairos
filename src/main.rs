@@ -3,9 +3,9 @@ mod model;
 mod scenario;
 mod term;
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -117,7 +117,7 @@ impl Hands {
     }
 }
 
-fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario) -> Result<()> {
+fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, restart: &mut dyn FnMut() -> Result<()>) -> Result<()> {
     // Codex shows its prompt for a moment before the trust question, so the prompt has to be up and holding still.
     let until = Instant::now() + Duration::from_secs(90);
     let mut hands = Hands::new();
@@ -135,6 +135,12 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario) -> Re
         sleep(Duration::from_millis(200));
     }
     for (i, turn) in scenario.turns.iter().enumerate() {
+        if turn.restart {
+            // Long enough for kairosd to have read and written the turn before.
+            sleep(Duration::from_secs(6));
+            restart()?;
+            sleep(Duration::from_secs(4));
+        }
         model.arm(i);
         term.type_text(turn.prompt)?;
         sleep(Duration::from_millis(400));
@@ -248,7 +254,7 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project
         differ(&mut problems, n, "prompt.pasted", &prompt["pasted"], json!(false));
         differ(&mut problems, n, "prompt.version", &prompt["version"], json!(version));
         differ(&mut problems, n, "the project", &prompt["project"], json!("proj"));
-        differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(1));
+        differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
         let edits: Vec<Value> = of("agent_edit").iter().map(|e| json!([e["path"], e["added"], e["removed"]])).collect();
         differ(&mut problems, n, "agent edits [path, added, removed]", &json!(edits), json!(want.edits));
         let commits = of("agent_commit");
@@ -329,13 +335,17 @@ fn run() -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 
-    let mut daemon = Command::new(&args.kairosd);
-    daemon.env("HOME", &home).env("USERPROFILE", &home).env("KAIROS_DIR", &kd);
-    daemon.stdin(Stdio::null()).stdout(File::create(run.join("kairosd.out"))?).stderr(File::create(run.join("kairosd.err"))?);
-    for k in STRAY_ENV {
-        daemon.env_remove(k);
-    }
-    let mut daemon = daemon.spawn().context("starting kairosd")?;
+    let start = || -> Result<Child> {
+        let log = |name: &str| OpenOptions::new().create(true).append(true).open(run.join(name));
+        let mut daemon = Command::new(&args.kairosd);
+        daemon.env("HOME", &home).env("USERPROFILE", &home).env("KAIROS_DIR", &kd);
+        daemon.stdin(Stdio::null()).stdout(log("kairosd.out")?).stderr(log("kairosd.err")?);
+        for k in STRAY_ENV {
+            daemon.env_remove(k);
+        }
+        daemon.spawn().context("starting kairosd")
+    };
+    let mut daemon = start()?;
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(&home, &project, &url, &version)?;
@@ -360,7 +370,13 @@ fn run() -> Result<bool> {
         cmd.env(k, v);
     }
     let mut term = Term::spawn(cmd, &run.join("pty.raw"))?;
-    let drove = drive(h, &mut term, &model, &scenario);
+    let mut restart = || -> Result<()> {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        daemon = start()?;
+        Ok(())
+    };
+    let drove = drive(h, &mut term, &model, &scenario, &mut restart);
     // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
     fs::write(run.join("screen.txt"), term.screen())?;

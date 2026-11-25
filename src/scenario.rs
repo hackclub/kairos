@@ -12,6 +12,8 @@ pub struct Turn {
     pub prompt: &'static str,
     pub acts: Vec<Act>,
     pub say: &'static str,
+    /// kairosd is stopped and started again before this turn, the way an update does it.
+    pub restart: bool,
 }
 
 pub struct Scenario {
@@ -23,6 +25,8 @@ pub struct Scenario {
 #[derive(Debug, PartialEq)]
 pub struct Want {
     pub prompt_words: usize,
+    /// Kairos counts the agent as started at its first tool call.
+    pub starts: usize,
     pub edits: Vec<(String, usize, usize)>,
     pub commits: usize,
     pub reply_words: usize,
@@ -46,6 +50,7 @@ impl Turn {
         files.dedup();
         Want {
             prompt_words: self.prompt.split_whitespace().count(),
+            starts: usize::from(!self.acts.is_empty()),
             files: files.len(),
             edits,
             commits,
@@ -94,11 +99,29 @@ pub fn basic() -> Scenario {
                     Act::Shell { cmd: "git commit -m \"add hello\"" },
                 ],
                 say: "Done. I wrote hello.py, changed the greeting and committed it.",
+                restart: false,
             },
             Turn {
                 prompt: "now greet one more name and leave it uncommitted",
                 acts: vec![Act::Edit { path: "hello.py", old: "print(greet(\"lab\"))", new: "print(greet(\"lab!\"))\nprint(greet(\"again\"))" }],
                 say: "Added one more greeting.",
+                restart: false,
+            },
+            Turn { prompt: "what does hello.py print when it runs?", acts: vec![], say: "It prints four greetings, one on each line.", restart: false },
+            Turn {
+                prompt: "move the names into a small module in a folder called pkg",
+                acts: vec![
+                    Act::Write { path: "pkg/util.py", content: "NAMES = [\"kairos\", \"lab\"]\n" },
+                    Act::Edit { path: "hello.py", old: "print(greet(\"again\"))", new: "print(greet(\"again!\"))\nprint(greet(\"util\"))" },
+                ],
+                say: "The names are in pkg/util.py now.",
+                restart: false,
+            },
+            Turn {
+                prompt: "commit that please",
+                acts: vec![Act::Shell { cmd: "git add -A" }, Act::Shell { cmd: "git commit -m \"add util\"" }],
+                say: "Committed.",
+                restart: true,
             },
         ],
     }

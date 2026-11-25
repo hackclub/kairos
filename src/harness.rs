@@ -53,6 +53,9 @@ pub const ALL: &[Harness] = &[
             (&["❯ No, exit", "Yes, I trust this folder"], &[DOWN]),
             (&["❯ Yes, I trust this folder"], &[ENTER]),
             (&["Do you trust the files in this folder?", "❯ 1. Yes, proceed"], &[ENTER]),
+            // Asked in Apple's Terminal, where it would change the terminal's own settings.
+            (&["❯ 2. No, maybe later with /terminal-setup"], &[ENTER]),
+            (&["No, maybe later with /terminal-setup"], &[DOWN]),
         ],
         ready: &["shift+tab to cycle", "? for shortcuts"],
         during: &[(&["Do you want to proceed?", "❯ No"], &[DOWN]), (&["Do you want to proceed?", "❯ Yes"], &[ENTER])],
