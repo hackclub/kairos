@@ -1,6 +1,8 @@
 mod app;
+mod credit;
 mod harness;
 mod model;
+mod person;
 mod scenario;
 mod term;
 
@@ -17,6 +19,7 @@ use serde_json::{json, Value};
 
 use harness::{Harness, Rule};
 use model::Model;
+use person::Person;
 use scenario::Scenario;
 use term::{Term, ENTER, ESC};
 
@@ -87,11 +90,12 @@ struct Hands {
     last: String,
     since: Instant,
     asked: Option<(usize, Instant)>,
+    person: Person,
 }
 
 impl Hands {
-    fn new() -> Hands {
-        Hands { last: String::new(), since: Instant::now(), asked: None }
+    fn new(person: &Person) -> Hands {
+        Hands { last: String::new(), since: Instant::now(), asked: None, person: person.clone() }
     }
 
     /// The screen and how long it has looked like this, after pressing the keys of the first rule that fits it. A rule
@@ -105,6 +109,7 @@ impl Hands {
         match (fits, self.asked) {
             (Some(i), Some((j, at))) if i == j => {
                 if at.elapsed() > Duration::from_secs(1) {
+                    self.person.press();
                     for k in rules[i].1 {
                         term.send(k)?;
                     }
@@ -155,11 +160,12 @@ struct Done {
     closed: Vec<(f64, f64)>,
 }
 
-fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage: Stage) -> Result<Done> {
-    let mut hands = Hands::new();
+fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, person: &Person, stage: Stage) -> Result<Done> {
+    let mut hands = Hands::new(person);
     let mut done = Done { esc: vec![None; scenario.turns.len()], closed: Vec::new() };
     ready(h, term, &mut hands)?;
     for (i, turn) in scenario.turns.iter().enumerate() {
+        person.busy(true);
         if turn.restart {
             // Long enough for kairosd to have read and written the turn before.
             sleep(Duration::from_secs(6));
@@ -167,6 +173,7 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             sleep(Duration::from_secs(4));
         }
         if turn.reopen {
+            person.busy(false);
             let closing = now();
             // Ctrl+C twice, the way out every one of them takes. A terminal whose program has gone refuses the second
             // on Mac and Windows.
@@ -183,9 +190,10 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             }
             term.kill();
             *term = (stage.reopen)()?;
-            hands = Hands::new();
+            hands = Hands::new(person);
             ready(h, term, &mut hands)?;
             done.closed.push((closing, now()));
+            person.busy(true);
         }
         model.arm(i);
         term.type_text(turn.prompt)?;
@@ -195,6 +203,8 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             sleep(Duration::from_secs(1));
         }
         sleep(Duration::from_millis(400));
+        person.busy(false);
+        person.press();
         term.send(ENTER)?;
         let until = Instant::now() + Duration::from_secs(90);
         while !(model.said(i) || (turn.interrupt && model.stalled(i))) {
@@ -211,12 +221,14 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             // Watching it work for a bit, then giving up on it.
             sleep(Duration::from_secs(3));
             done.esc[i] = Some(now());
+            person.press();
             term.send(ESC)?;
             // OpenCode wants a second press. Claude Code takes one, and a second would open its rewind list.
             let until = Instant::now() + Duration::from_secs(3);
             while Instant::now() < until {
                 sleep(Duration::from_millis(300));
                 if term.screen().contains("again to interrupt") {
+                    person.press();
                     term.send(ESC)?;
                     break;
                 }
@@ -227,6 +239,8 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
                 sleep(Duration::from_millis(200));
             }
         }
+        // Reading the reply.
+        person.busy(true);
         sleep(Duration::from_secs(4));
     }
     Ok(done)
@@ -476,7 +490,7 @@ fn keep(p: &Place, stores: &[&str]) -> Result<()> {
 
 /// Bugs the lab caught that a later kairosd fixes: number in BUGS.md, first release with the fix, text of the problem.
 /// On an older kairosd they are listed without failing the run, so the nightly stays quiet until the release.
-const KNOWN: &[(u32, &str, &str)] = &[(23, "0.1.20", "project is \"inner\"")];
+const KNOWN: &[(u32, &str, &str)] = &[(23, "0.1.20", "project \"inner\""), (23, "0.1.20", "project is \"inner\"")];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
     let out = Command::new(kairosd).arg("--version").stdin(Stdio::null()).output().context("kairosd --version")?;
@@ -589,9 +603,18 @@ fn run() -> Result<bool> {
         daemon = start()?;
         Ok(())
     };
-    let drove = drive(h, &mut term, &model, &scenario, Stage { restart: &mut restart, reopen: &mut reopen });
+    let person = Person::new(args.window)?;
+    let drove = drive(h, &mut term, &model, &scenario, &person, Stage { restart: &mut restart, reopen: &mut reopen });
     // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
+    if drove.is_ok() && args.window {
+        // Still reading the last reply until kairosd writes down the minute, which it does once a minute.
+        let (from, until) = (now(), Instant::now() + Duration::from_secs(65));
+        while Instant::now() < until && !events(kd)?.iter().any(|e| e["kind"] == "present" && e["ts"].as_f64().is_some_and(|t| t > from)) {
+            sleep(Duration::from_secs(1));
+        }
+    }
+    person.busy(false);
     fs::write(run.join("screen.txt"), term.screen())?;
     term.kill();
     if !launch.after.is_empty() {
@@ -616,10 +639,17 @@ fn run() -> Result<bool> {
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
     problems.extend(check(h, Some(&version), &scenario, &done.esc, &all, project)?);
+    let mut summary = None;
     if args.window {
         problems.extend(front(&all, h.id, "agent_terminal", &done.closed));
+        let (wrong, said) = credit::check(kd, h.id, "proj", &person)?;
+        problems.extend(wrong);
+        summary = Some(said);
     }
     let passed = report(h.id, &version, &scenario, &kairosd_version(&args.kairosd)?, &mine, &problems);
+    if let Some(said) = summary {
+        println!("  {said}");
+    }
     if let (Some(save), true) = (&args.save, problems.is_empty()) {
         let dir = save.join(h.id).join(&version).join(scenario.name);
         if dir.exists() {

@@ -61,7 +61,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends xvfb openbox xterm x11-utils
+          sudo apt-get install -y -q --no-install-recommends xvfb openbox xterm x11-utils xdotool
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x800x24 > /dev/null 2>&1 &
           for i in $(seq 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done

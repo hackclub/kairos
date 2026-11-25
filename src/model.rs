@@ -91,7 +91,9 @@ fn plan(state: &Mutex<State>, main: bool, answered: &[String]) -> Plan {
             Plan::Stall
         }
         None => {
-            s.said[turn] = true;
+            drop(s);
+            thread::sleep(Duration::from_secs(scenario.turns[turn].wait));
+            state.lock().unwrap().said[turn] = true;
             Plan::Say(scenario.turns[turn].say.to_string())
         }
     }

@@ -24,6 +24,8 @@ pub struct Turn {
     pub reopen: bool,
     /// The model stops answering after the acts and the person presses Esc.
     pub interrupt: bool,
+    /// Seconds the agent keeps working after its acts, with the person's hands off.
+    pub wait: u64,
 }
 
 pub struct Scenario {
@@ -126,6 +128,7 @@ pub fn basic() -> Scenario {
                 prompt: "now greet one more name and leave it uncommitted",
                 acts: vec![Act::Edit { path: "hello.py", old: "print(greet(\"lab\"))", new: "print(greet(\"lab!\"))\nprint(greet(\"again\"))" }],
                 say: "Added one more greeting.",
+                wait: 45,
                 ..Turn::default()
             },
             Turn { prompt: "what does hello.py print when it runs?", say: "It prints four greetings, one on each line.", ..Turn::default() },
