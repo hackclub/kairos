@@ -1,3 +1,4 @@
+mod app;
 mod harness;
 mod model;
 mod scenario;
@@ -19,7 +20,7 @@ use model::Model;
 use scenario::Scenario;
 use term::{Term, ENTER, ESC};
 
-const USAGE: &str = "usage: lab run <harness> [version|latest|N.x] --kairosd PATH [--work DIR] [--save DIR] [--real-home] [--window]";
+const USAGE: &str = "usage: lab run <harness or app> [version|latest|N.x] --kairosd PATH [--work DIR] [--save DIR] [--real-home] [--window]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
 const STRAY_ENV: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -259,13 +260,13 @@ fn differ(problems: &mut Vec<String>, turn: usize, what: &str, got: &Value, want
 /// A person watching the terminal the whole session: from the first prompt to the last reply the window in front is an
 /// agent in a terminal, in the project.
 /// While the harness is closed the terminal really is a plain terminal, and kairosd looks at the window every few seconds.
-fn front(all: &[Value], harness: &str, closed: &[(f64, f64)]) -> Vec<String> {
+fn front(all: &[Value], harness: &str, class: &str, closed: &[(f64, f64)]) -> Vec<String> {
     const LOOKS: f64 = 5.0;
     let of = |kind: &str| -> Vec<f64> { all.iter().filter(|e| e["harness"] == harness && e["kind"] == kind).filter_map(|e| e["ts"].as_f64()).collect() };
     let (Some(&from), Some(&to)) = (of("prompt").first(), of("reply_done").last()) else {
         return Vec::new();
     };
-    let want = (json!("agent_terminal"), json!("proj"));
+    let want = (json!(class), json!("proj"));
     let mut problems = Vec::new();
     let mut before = None;
     let focus: Vec<(f64, (Value, Value))> =
@@ -281,18 +282,20 @@ fn front(all: &[Value], harness: &str, closed: &[(f64, f64)]) -> Vec<String> {
     for &(_, back) in closed {
         match focus.iter().rev().find(|(ts, _)| *ts <= back + LOOKS) {
             Some((_, seen)) if *seen == want => {}
-            seen => problems.push(format!("{LOOKS} s after the harness was opened again the window in front was {seen:?}, not agent_terminal in proj")),
+            seen => problems.push(format!("{LOOKS} s after the harness was opened again the window in front was {seen:?}, not {class} in proj")),
         }
     }
     match before {
         Some(seen) if seen == want => {}
-        Some(seen) => problems.push(format!("at the first prompt the window in front was {} in project {}, not agent_terminal in proj", seen.0, seen.1)),
+        Some(seen) => problems.push(format!("at the first prompt the window in front was {} in project {}, not {class} in proj", seen.0, seen.1)),
         None => problems.push("Kairos reported no window before the first prompt".to_string()),
     }
     problems
 }
 
-fn check(h: &Harness, version: &str, scenario: &Scenario, esc: &[Option<f64>], all: &[Value], project: &Path) -> Result<Vec<String>> {
+/// `version` is the harness's, when the lab knows which one runs (an app brings its own).
+fn check(h: &Harness, version: Option<&str>, scenario: &Scenario, esc: &[Option<f64>], all: &[Value], project: &Path) -> Result<Vec<String>> {
+    let marks = version.is_some_and(|v| h.marks(v));
     let mut problems = Vec::new();
     let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
     let files = scenario.files();
@@ -333,10 +336,12 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, esc: &[Option<f64>], a
         differ(&mut problems, n, "prompt.words", &prompt["words"], json!(want.prompt_words));
         differ(&mut problems, n, "prompt.pasted", &prompt["pasted"], json!(want.pasted));
         // Claude Code keeps what was pasted apart in its prompt history.
-        if h.marks(version) && want.paste_words > 0 {
+        if marks && want.paste_words > 0 {
             differ(&mut problems, n, "prompt.shape.marked", &prompt["shape"]["marked"], json!({ "pastes": 1, "words": want.paste_words }));
         }
-        differ(&mut problems, n, "prompt.version", &prompt["version"], json!(version));
+        if let Some(v) = version {
+            differ(&mut problems, n, "prompt.version", &prompt["version"], json!(v));
+        }
         differ(&mut problems, n, "the project", &prompt["project"], json!("proj"));
         differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
         let edits: Vec<Value> = of("agent_edit").iter().map(|e| json!([e["path"], e["added"], e["removed"]])).collect();
@@ -350,7 +355,7 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, esc: &[Option<f64>], a
             }
         }
         let asks = of("answered");
-        differ(&mut problems, n, "answered count", &json!(asks.len()), json!(if h.marks(version) { want.asks } else { 0 }));
+        differ(&mut problems, n, "answered count", &json!(asks.len()), json!(if marks { want.asks } else { 0 }));
         for a in asks {
             differ(&mut problems, n, "answered.why", &a["why"], json!("permission"));
             let (asked, at) = (a["asked"].as_f64().unwrap_or(0.0), a["ts"].as_f64().unwrap_or(0.0));
@@ -392,14 +397,17 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<bool> {
-    let args = args()?;
-    let h = harness::find(&args.harness)?;
-    fs::create_dir_all(&args.work)?;
-    let root = std::path::absolute(&args.work)?;
-    let (bin, version) = h.install(&args.version, &root.join("tools"))?;
+/// One run's folders: the home the harness and kairosd see, the project and kairosd's own folder.
+struct Place {
+    run: PathBuf,
+    home: PathBuf,
+    project: PathBuf,
+    kd: PathBuf,
+}
+
+fn place(args: &Args, name: &str, version: &str, state: &[&str]) -> Result<Place> {
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let run = root.join(format!("{}-{version}-{stamp}", h.id));
+    let run = std::path::absolute(&args.work)?.join(format!("{name}-{version}-{stamp}"));
     // kairosd on Windows asks the system for the home folder, no variable moves it, so there the run uses the real one.
     let home = if args.real_home {
         if std::env::var_os("CI").is_none() {
@@ -407,7 +415,7 @@ fn run() -> Result<bool> {
         }
         let home = PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).context("no home folder")?);
         // Every run starts as a first install, with nothing an earlier version left behind.
-        for kept in h.state {
+        for kept in state {
             let old = home.join(kept);
             if old.is_dir() {
                 fs::remove_dir_all(&old)?;
@@ -429,26 +437,76 @@ fn run() -> Result<bool> {
     fs::write(project.join("README.md"), "# demo\n")?;
     git(&project, &["add", "-A"])?;
     git(&project, &["commit", "-q", "-m", "init"])?;
+    Ok(Place { run, home, project, kd })
+}
+
+fn daemon(args: &Args, p: &Place) -> Result<Child> {
+    let log = |name: &str| OpenOptions::new().create(true).append(true).open(p.run.join(name));
+    let mut daemon = Command::new(&args.kairosd);
+    daemon.env("HOME", &p.home).env("USERPROFILE", &p.home).env("KAIROS_DIR", &p.kd);
+    daemon.stdin(Stdio::null()).stdout(log("kairosd.out")?).stderr(log("kairosd.err")?);
+    for k in STRAY_ENV {
+        daemon.env_remove(k);
+    }
+    let mut child = daemon.spawn().context("starting kairosd")?;
+    sleep(Duration::from_secs(1));
+    if let Ok(Some(status)) = child.try_wait() {
+        let err = fs::read_to_string(p.run.join("kairosd.err")).unwrap_or_default();
+        bail!("kairosd quit right away ({status}): {}", err.lines().last().unwrap_or_default());
+    }
+    Ok(child)
+}
+
+/// Copies what the harness wrote next to the run, so a wrong event can be traced to the line it came from.
+fn keep(p: &Place, stores: &[&str]) -> Result<()> {
+    for store in stores {
+        let (from, to) = (p.home.join(store), p.run.join("store").join(store));
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else if from.is_file() {
+            fs::create_dir_all(to.parent().context("a store path with no folder")?)?;
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn report(name: &str, version: &str, scenario: &Scenario, mine: &[Value], problems: &[String]) {
+    for e in mine {
+        println!("{e}");
+    }
+    if problems.is_empty() {
+        println!("PASS {name} {version} {}: {} events match the script", scenario.name, mine.len());
+    } else {
+        println!("FAIL {name} {version} {}:", scenario.name);
+        for p in problems {
+            println!("  {p}");
+        }
+    }
+}
+
+fn run() -> Result<bool> {
+    let args = args()?;
+    fs::create_dir_all(&args.work)?;
+    if let Some(app) = app::find(&args.harness) {
+        return app::run(app, &args);
+    }
+    let h = harness::find(&args.harness)?;
+    let root = std::path::absolute(&args.work)?;
+    let (bin, version) = h.install(&args.version, &root.join("tools"))?;
+    let p = place(&args, h.id, &version, h.state)?;
+    let Place { run, home, project, kd } = &p;
 
     let scenario = Arc::new(scenario::basic());
     let model = Model::start(scenario.clone(), project.clone())?;
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 
-    let start = || -> Result<Child> {
-        let log = |name: &str| OpenOptions::new().create(true).append(true).open(run.join(name));
-        let mut daemon = Command::new(&args.kairosd);
-        daemon.env("HOME", &home).env("USERPROFILE", &home).env("KAIROS_DIR", &kd);
-        daemon.stdin(Stdio::null()).stdout(log("kairosd.out")?).stderr(log("kairosd.err")?);
-        for k in STRAY_ENV {
-            daemon.env_remove(k);
-        }
-        daemon.spawn().context("starting kairosd")
-    };
+    let start = || daemon(&args, &p);
     let mut daemon = start()?;
     sleep(Duration::from_secs(2));
 
-    let launch = (h.prepare)(&home, &project, &url, &version)?;
+    let launch = (h.prepare)(home, project, &url, &version)?;
     let open = |args: &[String], raw: &str| -> Result<Term> {
         // npm's launchers on Windows are batch files, which only cmd can start.
         let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
@@ -460,9 +518,9 @@ fn run() -> Result<bool> {
             CommandBuilder::new(&bin)
         };
         cmd.args(args);
-        cmd.cwd(&project);
-        cmd.env("HOME", &home);
-        cmd.env("USERPROFILE", &home);
+        cmd.cwd(project);
+        cmd.env("HOME", home);
+        cmd.env("USERPROFILE", home);
         cmd.env("TERM", "xterm-256color");
         for k in STRAY_ENV {
             cmd.env_remove(k);
@@ -487,7 +545,7 @@ fn run() -> Result<bool> {
     term.kill();
     if !launch.after.is_empty() {
         let mut stop = Command::new(&bin);
-        stop.args(&launch.after).current_dir(&project).env("HOME", &home).env("USERPROFILE", &home).stdin(Stdio::null());
+        stop.args(&launch.after).current_dir(project).env("HOME", home).env("USERPROFILE", home).stdin(Stdio::null());
         for k in STRAY_ENV {
             stop.env_remove(k);
         }
@@ -497,39 +555,20 @@ fn run() -> Result<bool> {
     let _ = daemon.wait();
     // Codex leaves a server running from the run's own home.
     #[cfg(unix)]
-    let _ = Command::new("pkill").arg("-f").arg(&run).status();
+    let _ = Command::new("pkill").arg("-f").arg(run).status();
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
     fs::write(run.join("requests.jsonl"), requests)?;
-    // What Kairos read, kept next to the run so a wrong event can be traced to the line it came from.
-    for store in h.stores {
-        let (from, to) = (home.join(store), run.join("store").join(store));
-        if from.is_dir() {
-            copy_dir(&from, &to)?;
-        } else if from.is_file() {
-            fs::create_dir_all(to.parent().context("a store path with no folder")?)?;
-            fs::copy(&from, &to)?;
-        }
-    }
+    keep(&p, h.stores)?;
     let done = drove?;
 
-    let all = events(&kd)?;
+    let all = events(kd)?;
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
-    problems.extend(check(h, &version, &scenario, &done.esc, &all, &project)?);
+    problems.extend(check(h, Some(&version), &scenario, &done.esc, &all, project)?);
     if args.window {
-        problems.extend(front(&all, h.id, &done.closed));
+        problems.extend(front(&all, h.id, "agent_terminal", &done.closed));
     }
-    for e in &mine {
-        println!("{e}");
-    }
-    if problems.is_empty() {
-        println!("PASS {} {version} {}: {} events match the script", h.id, scenario.name, mine.len());
-    } else {
-        println!("FAIL {} {version} {}:", h.id, scenario.name);
-        for p in &problems {
-            println!("  {p}");
-        }
-    }
+    report(h.id, &version, &scenario, &mine, &problems);
     if let (Some(save), true) = (&args.save, problems.is_empty()) {
         let dir = save.join(h.id).join(&version).join(scenario.name);
         if dir.exists() {
@@ -537,7 +576,7 @@ fn run() -> Result<bool> {
         }
         fs::create_dir_all(&dir)?;
         // OpenCode's database is 14 MB of mostly cache, so the store is kept packed, byte for byte as the harness left it.
-        let packed = Command::new("tar").arg("-czf").arg(dir.join("store.tar.gz")).arg("-C").arg(&run).arg("store").status()?;
+        let packed = Command::new("tar").arg("-czf").arg(dir.join("store.tar.gz")).arg("-C").arg(run).arg("store").status()?;
         if !packed.success() {
             bail!("tar could not pack the sample's store");
         }

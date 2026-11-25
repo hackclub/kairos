@@ -162,7 +162,33 @@ pub fn find(id: &str) -> Result<&'static Harness> {
     }
 }
 
-fn output(cmd: &mut Command) -> Result<String> {
+/// The highest release of a GitHub repo that is not a pre-release, within one major version if given.
+pub fn newest_release(repo: &str, major: Option<&str>) -> Result<String> {
+    let all = output(&mut github(&format!("https://api.github.com/repos/{repo}/releases?per_page=100")))?;
+    let all: Value = serde_json::from_str(&all).context("GitHub's releases")?;
+    let numbers = |r: &Value| -> Option<Vec<u64>> {
+        if r["prerelease"] == true || r["draft"] == true {
+            return None;
+        }
+        let n: Vec<u64> = r["tag_name"].as_str()?.strip_prefix('v')?.split('.').map(str::parse).collect::<Result<_, _>>().ok()?;
+        (n.len() == 3 && major.is_none_or(|m| n[0].to_string() == m)).then_some(n)
+    };
+    let top = all.as_array().into_iter().flatten().filter_map(numbers).max().unwrap_or_default();
+    Ok(top.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
+}
+
+/// curl for a GitHub URL. Runners share addresses, and GitHub turns away their unsigned requests.
+pub fn github(url: &str) -> Command {
+    let mut curl = Command::new("curl");
+    curl.args(["-fsSL", "--retry", "3"]);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        curl.args(["-H", &format!("Authorization: Bearer {token}")]);
+    }
+    curl.arg(url);
+    curl
+}
+
+pub fn output(cmd: &mut Command) -> Result<String> {
     let out = cmd.output().with_context(|| format!("running {:?}", cmd.get_program()))?;
     if !out.status.success() {
         bail!("{:?} failed: {}", cmd.get_program(), String::from_utf8_lossy(&out.stderr).trim());
@@ -192,25 +218,7 @@ impl Harness {
                     one => one.as_str().unwrap_or_default().to_string(),
                 }
             }
-            (Source::Github(repo), _) => {
-                let mut curl = Command::new("curl");
-                curl.arg("-fsSL");
-                // Runners share addresses, and GitHub turns away their unsigned requests.
-                if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-                    curl.args(["-H", &format!("Authorization: Bearer {token}")]);
-                }
-                let all = output(curl.arg(format!("https://api.github.com/repos/{repo}/releases?per_page=100")))?;
-                let all: Value = serde_json::from_str(&all).context("GitHub's releases")?;
-                let numbers = |r: &Value| -> Option<Vec<u64>> {
-                    if r["prerelease"] == true || r["draft"] == true {
-                        return None;
-                    }
-                    let n: Vec<u64> = r["tag_name"].as_str()?.strip_prefix('v')?.split('.').map(str::parse).collect::<Result<_, _>>().ok()?;
-                    (n.len() == 3 && major.is_none_or(|m| n[0].to_string() == m)).then_some(n)
-                };
-                let top = all.as_array().into_iter().flatten().filter_map(numbers).max().unwrap_or_default();
-                top.iter().map(u64::to_string).collect::<Vec<_>>().join(".")
-            }
+            (Source::Github(repo), _) => newest_release(repo, major)?,
         };
         if version.is_empty() {
             bail!("could not find the newest {} for {want:?}", self.id);
@@ -243,7 +251,7 @@ impl Harness {
                 };
                 let asset = format!("{}-{os}-{}.{ext}", self.bin, if ARCH == "aarch64" { "arm64" } else { "x64" });
                 let url = format!("https://github.com/{repo}/releases/download/v{version}/{asset}");
-                output(Command::new("curl").args(["-fsSL", "-o"]).arg(dir.join(&asset)).arg(&url)).with_context(|| url.clone())?;
+                output(Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(dir.join(&asset)).arg(&url)).with_context(|| url.clone())?;
                 output(Command::new("tar").arg("-xf").arg(dir.join(&asset)).arg("-C").arg(&dir))?;
                 fs::remove_file(dir.join(&asset))?;
             }

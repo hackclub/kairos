@@ -199,3 +199,10 @@ hello util
 [run 2] done in 0.01 s
 exit code 0
 ";
+
+/// For an app: the first five turns, typed into its own window, with the kairosd restart.
+pub fn app() -> Scenario {
+    let mut s = basic();
+    s.turns.truncate(5);
+    Scenario { name: "app", turns: s.turns }
+}
