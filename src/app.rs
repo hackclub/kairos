@@ -37,6 +37,19 @@ pub struct App {
     /// The program's file name, where it isn't the one inside a macOS .app.
     exe: fn(&str) -> bool,
     drive: Drive,
+    /// The agent to pick in an app that runs several, where it isn't the app's first.
+    pick: Option<Pick>,
+}
+
+struct Pick {
+    /// The name the app shows for the agent.
+    name: &'static str,
+    /// The app's id for it.
+    id: &'static str,
+    /// The lab's model by name, where the agent also offers models of its own.
+    model: Option<&'static str>,
+    /// Off until turned on, on the welcome page.
+    off: bool,
 }
 
 enum Drive {
@@ -46,6 +59,23 @@ enum Drive {
     Keys,
 }
 
+fn t3_asset(v: &str) -> String {
+    match (OS, ARCH) {
+        ("linux", _) => format!("T3-Code-{v}-amd64.deb"),
+        ("macos", "aarch64") => format!("T3-Code-{v}-arm64.zip"),
+        ("macos", _) => format!("T3-Code-{v}-x64.zip"),
+        _ => format!("T3-Code-{v}-x64.exe"),
+    }
+}
+
+fn t3_exe(name: &str) -> bool {
+    if OS == "linux" {
+        name == "t3code"
+    } else {
+        name.starts_with("T3 Code") && name.ends_with(".exe")
+    }
+}
+
 pub const ALL: &[App] = &[
     App {
         id: "t3code",
@@ -53,14 +83,34 @@ pub const ALL: &[App] = &[
         harness: "claude-code",
         state: &[".t3", ".claude", ".claude.json"],
         stores: &[".claude/projects", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
-        asset: |v| match (OS, ARCH) {
-            ("linux", _) => format!("T3-Code-{v}-amd64.deb"),
-            ("macos", "aarch64") => format!("T3-Code-{v}-arm64.zip"),
-            ("macos", _) => format!("T3-Code-{v}-x64.zip"),
-            _ => format!("T3-Code-{v}-x64.exe"),
-        },
-        exe: |name| if OS == "linux" { name == "t3code" } else { name.starts_with("T3 Code") && name.ends_with(".exe") },
+        asset: t3_asset,
+        exe: t3_exe,
         drive: Drive::Page,
+        pick: None,
+    },
+    // T3 starts `codex app-server` itself, on the same ~/.codex.
+    App {
+        id: "t3code-codex",
+        repo: "pingdotgg/t3code",
+        harness: "codex",
+        state: &[".t3", ".codex"],
+        stores: &[".codex/sessions", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
+        asset: t3_asset,
+        exe: t3_exe,
+        drive: Drive::Page,
+        pick: Some(Pick { name: "Codex", id: "codex", model: None, off: false }),
+    },
+    // T3 starts `opencode serve` itself, on the same config and database.
+    App {
+        id: "t3code-opencode",
+        repo: "pingdotgg/t3code",
+        harness: "opencode",
+        state: &[".t3", ".config/opencode", ".local/share/opencode", ".local/state/opencode"],
+        stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".t3/userdata/statev2.sqlite", ".t3/userdata/statev2.sqlite-wal", ".t3/userdata/logs"],
+        asset: t3_asset,
+        exe: t3_exe,
+        drive: Drive::Page,
+        pick: Some(Pick { name: "OpenCode", id: "opencode", model: Some("test-model"), off: true }),
     },
     // Stable builds drop --remote-debugging-port. Its own state is in the system's app data folder, which on Windows
     // isn't under the run's home.
@@ -78,6 +128,7 @@ pub const ALL: &[App] = &[
         },
         exe: |name| if OS == "linux" { name == "ai.opencode" } else { name == "OpenCode.exe" },
         drive: Drive::Keys,
+        pick: None,
     },
 ];
 
@@ -202,7 +253,7 @@ impl Page {
 
     /// A left click in the middle of an element, found by a script that gives back its box.
     fn click_at(&mut self, find: &str, what: &str) -> Result<()> {
-        let at = self.eval(&format!("(() => {{ const e = {find}; if (!e) return null; const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"))?;
+        let at = self.eval(&format!("(() => {{ const e = {find}; if (!e) return null; e.scrollIntoView({{ block: 'center' }}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"))?;
         let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { bail!("nothing to click for {what:?}. Page:\n{}", self.text()?) };
         self.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y }))?;
         self.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }))?;
@@ -246,6 +297,7 @@ impl Page {
         let code = match key {
             "Enter" => 13,
             "Backspace" => 8,
+            "Escape" => 27,
             _ => bail!("the lab has no key {key}"),
         };
         let mut down = json!({ "type": "keyDown", "key": key, "code": key, "windowsVirtualKeyCode": code });
@@ -259,9 +311,37 @@ impl Page {
 }
 
 /// T3 Code's first run: a welcome page, then a project from a folder on disk, then a thread's message box.
-fn t3_start(page: &mut Page, project: &Path) -> Result<()> {
+fn t3_start(page: &mut Page, project: &Path, pick: Option<&Pick>) -> Result<()> {
     // Each run starts from a fresh home, so the welcome page always comes, sometimes a moment after the app's frame.
     page.wait_for(&["Welcome to T3 Code"], Duration::from_secs(90))?;
+    if let Some(p) = pick.filter(|p| p.off) {
+        // The list of agents comes once the app has looked for them, the ones it didn't find folded away below.
+        let find = format!("document.querySelector('[aria-label=\"Turn on: {}\"]')", p.name);
+        let until = Instant::now() + Duration::from_secs(60);
+        let mut unfolded = false;
+        while page.eval(&format!("!!{find}"))? != json!(true) && Instant::now() < until {
+            let text = page.text()?;
+            if !unfolded && !text.contains("Checking") {
+                if let Some(more) = ["Add more agents", "Set up an agent"].into_iter().find(|m| text.contains(m)) {
+                    page.click(more)?;
+                    unfolded = true;
+                }
+            }
+            sleep(Duration::from_millis(500));
+        }
+        // Clicked again while the list is still unfolding, until the button gives way to the agent's state.
+        for _ in 0..6 {
+            page.click_at(&find, &format!("Turn on {}", p.name))?;
+            let until = Instant::now() + Duration::from_secs(10);
+            while page.eval(&format!("!!{find}"))? == json!(true) && Instant::now() < until {
+                sleep(Duration::from_millis(500));
+            }
+            if page.eval(&format!("!!{find}"))? != json!(true) {
+                break;
+            }
+        }
+    }
+    // Start stays greyed out until an agent is ready, which takes the agent's own server a moment.
     page.press("Start", "Add project")?;
     page.press("Add project", "Local folder")?;
     page.press("Local folder", "Directories")?;
@@ -274,6 +354,28 @@ fn t3_start(page: &mut Page, project: &Path) -> Result<()> {
     page.key("Enter")?;
     page.wait_for(&["Ask anything"], Duration::from_secs(30))?;
     sleep(Duration::from_secs(2));
+    if let Some(p) = pick {
+        // The model button under the message box, the agent on the picker's side, then the model by name.
+        page.click_at("document.querySelector('[data-chat-provider-model-picker=\"true\"]')", "the model picker")?;
+        sleep(Duration::from_secs(1));
+        page.click_at(&format!("document.querySelector('[data-model-picker-provider=\"{}\"]')", p.id), p.name)?;
+        sleep(Duration::from_secs(1));
+        // Codex sends every model it lists to the lab's provider. OpenCode also offers its own hosted models, which
+        // must never get the lab's prompts.
+        if let Some(model) = p.model {
+            page.type_text(model)?;
+            sleep(Duration::from_secs(1));
+        }
+        page.click_at("document.querySelector('[data-model-picker-content] [role=option]:not([aria-expanded])')", &format!("a {} model", p.name))?;
+        sleep(Duration::from_secs(1));
+        let shown = page.eval("(document.querySelector('[data-chat-provider-model-picker=\"true\"]') || {}).innerText || ''")?;
+        if let Some(model) = p.model.filter(|m| !shown.as_str().is_some_and(|s| s.contains(m))) {
+            bail!("picked {model} but the model button says {shown}. Page:\n{}", page.text()?);
+        }
+        // Picking a model moves on to its reasoning levels, the default is fine.
+        page.key("Escape")?;
+        sleep(Duration::from_secs(1));
+    }
     Ok(())
 }
 
@@ -309,8 +411,8 @@ impl Turns<'_> {
     }
 }
 
-fn drive(page: &mut Page, scenario: &Scenario, project: &Path, turns: &mut Turns) -> Result<()> {
-    t3_start(page, project)?;
+fn drive(page: &mut Page, scenario: &Scenario, project: &Path, pick: Option<&Pick>, turns: &mut Turns) -> Result<()> {
+    t3_start(page, project, pick)?;
     let composer = "[...document.querySelectorAll('[contenteditable=true]')].find(e => e.getBoundingClientRect().width > 0)";
     let page = std::cell::RefCell::new(page);
     for (i, turn) in scenario.turns.iter().enumerate() {
@@ -397,6 +499,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         cmd.env(k, v);
     }
     let bin = cli.parent().context("the harness has no folder")?.to_path_buf();
+    let bin_dir = bin.clone();
     // On Windows an app can't run npm's claude.cmd without a shell. T3 looks for the package next to the shim, the way
     // a global npm install lays it out, so the program itself goes on PATH first.
     let native = bin.parent().map(|m| m.join("@anthropic-ai").join("claude-code").join("bin")).filter(|d| cfg!(windows) && d.join("claude.exe").is_file());
@@ -413,7 +516,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let mut turns = Turns { model: &model, person: &person, restart: &mut restart };
     let drove = match app.drive {
         Drive::Page => Page::open(PORT, Duration::from_secs(90)).and_then(|mut page| {
-            let r = drive(&mut page, &scenario, &p.project, &mut turns);
+            let r = drive(&mut page, &scenario, &p.project, app.pick.as_ref(), &mut turns);
             if r.is_err() {
                 let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
             }
@@ -437,6 +540,8 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).output();
     } else {
         let _ = Command::new("pkill").arg("-f").arg(folder).status();
+        // The agent's server the app started from the harness's own folder.
+        let _ = Command::new("pkill").arg("-f").arg(&bin_dir).status();
     }
     let _ = child.kill();
     let _ = child.wait();

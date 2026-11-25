@@ -174,7 +174,10 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
         (json!({ "model": "lab/test-model", "provider": { "lab": lab } }), vec![], vec![])
     } else {
         let lab = json!({ "package": "@opencode/ai/providers/openai-compatible", "settings": { "baseURL": base }, "env": ["LAB_KEY"], "models": models });
-        (json!({ "model": "lab/test-model", "providers": { "lab": lab } }), vec!["--auto".to_string()], vec!["service".to_string(), "stop".to_string()])
+        // `opencode serve`, which apps like T3 Code start, still reads only the 1.x keys and drops the 2.x ones.
+        let old = json!({ "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": base, "apiKey": "lab" }, "models": models });
+        let config = json!({ "model": "lab/test-model", "providers": { "lab": lab }, "provider": { "lab": old } });
+        (config, vec!["--auto".to_string()], vec!["service".to_string(), "stop".to_string()])
     };
     fs::write(dir.join("opencode.json"), serde_json::to_string_pretty(&config)?)?;
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();

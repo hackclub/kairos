@@ -15,6 +15,10 @@ env:
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
   CANDIDATE: ""
+  # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
+  # macos). Empty means all.
+  ONLY: ""
+  SYSTEMS: ""
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
@@ -52,13 +56,13 @@ jobs:
           tar -xzf dist.tgz -C dist
       # Each run happens in a terminal window in front, where Kairos has to find the agent.
       - name: every version (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'windows'))
         shell: bash
         # Sourced: a script started from Git Bash gets a parent Windows no longer knows, and Kairos walks the console's
         # processes from parent to child.
         run: . ci/all.sh ${{ matrix.target }} --real-home --window
       - name: every version (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'linux'))
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends xvfb openbox xterm x11-utils xdotool
@@ -71,9 +75,9 @@ jobs:
           cat result.txt
           exit "$(cat failed.txt)"
       - name: every version (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'macos'))
         run: |
-          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
+          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"
           for i in $(seq 3300); do [ -f failed.txt ] && break; sleep 2; done

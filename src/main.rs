@@ -507,6 +507,7 @@ const KNOWN: &[Known] = &[
     Known { bug: 29, harness: "antigravity", fixed: "0.1.20", text: "credit came while nobody had touched anything" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "in project null" },
     Known { bug: 24, harness: "opencode-desktop", fixed: "0.1.20", text: "s the person spent reading and typing" },
+    Known { bug: 31, harness: "t3code-opencode", fixed: "0.1.21", text: "Kairos saw 6 prompts, the lab typed 5" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
@@ -528,7 +529,9 @@ fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &
     let known = |p: &String| {
         KNOWN.iter().find(|k| (k.harness.is_empty() || k.harness == name) && (k.fixed.is_empty() || older(kairosd, k.fixed)) && p.contains(k.text))
     };
-    let real: Vec<&String> = problems.iter().filter(|p| known(p).is_none()).collect();
+    // A known extra or missing prompt moves every turn after it, so those turns can't be checked.
+    let shifted = problems.iter().any(|p| p.starts_with("Kairos saw") && known(p).is_some());
+    let real: Vec<&String> = problems.iter().filter(|p| !shifted && known(p).is_none()).collect();
     if real.is_empty() {
         println!("PASS {name} {version} {}: {} events match the script", scenario.name, mine.len());
     } else {
@@ -538,6 +541,10 @@ fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &
         }
     }
     for p in problems {
+        if shifted && known(p).is_none() {
+            println!("  after a known extra or missing prompt: {p}");
+            continue;
+        }
         match known(p) {
             Some(k) if k.fixed.is_empty() => println!("  known open bug #{}: {p}", k.bug),
             Some(k) => println!("  known bug #{} in kairosd {kairosd}, fixed in {}: {p}", k.bug, k.fixed),
@@ -622,6 +629,14 @@ fn run() -> Result<bool> {
         Term::spawn(cmd, &run.join(raw))
     };
     let mut term = open(&launch.args, "pty.raw")?;
+    if args.window {
+        // A person starts on the agent once it's up in their terminal. Kairos sees the new program a moment later, and
+        // keys pressed before that count for whatever ran there first, the lab itself here.
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until && !events(kd)?.iter().any(|e| e["kind"] == "focus" && e["class"] == "agent_terminal") {
+            sleep(Duration::from_millis(300));
+        }
+    }
     let mut reopen = || open(&launch.resume, "pty2.raw");
     let mut restart = || -> Result<()> {
         let _ = daemon.kill();

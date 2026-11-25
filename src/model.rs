@@ -1,6 +1,7 @@
 //! A model API that plays the scenario instead of thinking: each request of the armed turn gets the next scripted
 //! tool call, then the closing text. Tool call ids carry the turn and step, so a retried request gets the same answer.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -168,9 +169,22 @@ fn patch_lines(sign: char, text: &str) -> String {
     text.lines().map(|l| format!("{sign}{l}\n")).collect()
 }
 
+/// Code mode (Codex with GPT-6 models): the only tool is `exec`, JavaScript that calls the real tools on `tools`.
+fn code_mode(tools: &[Value]) -> bool {
+    tools.iter().any(|t| t["type"] == "custom" && t["name"] == "exec")
+}
+
+fn exec_item(call_id: &str, js: String) -> Value {
+    json!({ "type": "custom_tool_call", "name": "exec", "input": js, "call_id": call_id })
+}
+
 /// A shell call in whichever form this version offers, with the arguments its own schema names.
 fn shell_item(tools: &[Value], call_id: &str, cmd: &str, project: &Path) -> Option<Value> {
     let dir = project.to_string_lossy();
+    if code_mode(tools) {
+        let args = json!({ "cmd": cmd, "workdir": dir });
+        return Some(exec_item(call_id, format!("const r = await tools.exec_command({args});\ntext(r);\n")));
+    }
     if tools.iter().any(|t| t["type"] == "local_shell") {
         let action = json!({ "type": "exec", "command": ["bash", "-lc", cmd], "working_directory": dir });
         return Some(json!({ "type": "local_shell_call", "call_id": call_id, "status": "completed", "action": action }));
@@ -194,6 +208,9 @@ fn shell_item(tools: &[Value], call_id: &str, cmd: &str, project: &Path) -> Opti
 }
 
 fn patch_item(tools: &[Value], call_id: &str, patch: &str, project: &Path) -> Option<Value> {
+    if code_mode(tools) {
+        return Some(exec_item(call_id, format!("const r = await tools.apply_patch({});\ntext(r);\n", json!(patch))));
+    }
     match tools.iter().find(|t| t["name"] == "apply_patch") {
         Some(t) if t["type"] == "custom" => Some(json!({ "type": "custom_tool_call", "name": "apply_patch", "input": patch, "call_id": call_id })),
         Some(_) => Some(json!({ "type": "function_call", "name": "apply_patch", "arguments": json!({ "input": patch }).to_string(), "call_id": call_id })),
@@ -201,10 +218,30 @@ fn patch_item(tools: &[Value], call_id: &str, patch: &str, project: &Path) -> Op
     }
 }
 
-fn responses(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
-    let tools = body["tools"].as_array().cloned().unwrap_or_default();
+/// Every tool a request offers: the `tools` list, and since code mode also `additional_tools` in the input, grouped in
+/// namespaces.
+fn offered(body: &Value) -> Vec<Value> {
+    fn flat(list: &[Value], out: &mut Vec<Value>) {
+        for t in list {
+            match t["tools"].as_array() {
+                Some(inner) if t["type"] == "namespace" => flat(inner, out),
+                _ => out.push(t.clone()),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    flat(body["tools"].as_array().map(Vec::as_slice).unwrap_or_default(), &mut out);
+    for i in body["input"].as_array().into_iter().flatten().filter(|i| i["type"] == "additional_tools") {
+        flat(i["tools"].as_array().map(Vec::as_slice).unwrap_or_default(), &mut out);
+    }
+    out
+}
+
+/// `side`: a job the app runs on the side, like naming a thread, which offers the same tools.
+fn responses(state: &Mutex<State>, body: &Value, side: bool) -> (&'static str, String, String) {
+    let tools = offered(body);
     let input = body["input"].as_array().cloned().unwrap_or_default();
-    let main = !tools.is_empty() && !input.is_empty();
+    let main = !side && !tools.is_empty() && !input.is_empty();
     let answered: Vec<String> = input
         .iter()
         .filter(|i| i["type"].as_str().is_some_and(|t| t.ends_with("_output")))
@@ -325,6 +362,12 @@ fn handle(state: &Mutex<State>, mut req: Request) {
     let _ = req.as_reader().read_to_string(&mut raw);
     let body: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let url = req.url().to_string();
+    // For looking at what a new harness sends: every request whole, one per line.
+    if let Some(f) = std::env::var_os("LAB_DUMP") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+            let _ = writeln!(f, "{}", json!({ "path": url, "headers": req.headers().iter().map(|h| format!("{}: {}", h.field, h.value)).collect::<Vec<_>>(), "body": raw }));
+        }
+    }
     let path = url.split('?').next().unwrap_or_default();
     let (ctype, out, note) = if *req.method() != Method::Post {
         ("application/json", json!({ "object": "list", "data": [] }).to_string(), "get".to_string())
@@ -333,13 +376,15 @@ fn handle(state: &Mutex<State>, mut req: Request) {
     } else if path.ends_with("/messages") {
         anthropic(state, &body)
     } else if path.ends_with("/responses") {
-        responses(state, &body)
+        // T3 Code names threads and writes commit messages with `codex exec`, which the lab never runs as the harness.
+        let side = req.headers().iter().any(|h| h.field.equiv("User-Agent") && h.value.as_str().contains("codex_exec"));
+        responses(state, &body, side)
     } else if path.ends_with("/chat/completions") {
         chat(state, &body)
     } else {
         ("application/json", "{}".to_string(), "unknown".to_string())
     };
-    let tools = names(body["tools"].as_array().map(Vec::as_slice).unwrap_or_default());
+    let tools = names(&offered(&body));
     let record = json!({ "method": req.method().as_str(), "path": url, "model": body["model"], "stream": body["stream"], "tools": tools, "reply": note });
     state.lock().unwrap().requests.push(record);
     if note.starts_with("lab_") || note == "say" {
