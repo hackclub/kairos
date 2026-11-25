@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use kairos_core::event::{Event, Kind, MAX_PATHS, MAX_PATH_LEN};
 use kairos_core::exclude::Exclusions;
+use kairos_core::project::{project_of, Project};
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use walkdir::WalkDir;
@@ -84,9 +85,30 @@ impl State {
         ids
     }
 
+    fn add_root(&mut self, root: PathBuf, id: String, ex: &Exclusions, ids: &mut ProjectIds, out: &Sender<Msg>, git: &Sender<git::Cmd>) {
+        if let Some(from) = ids.observe(&root, &id, now()) {
+            diag!("kairosd: project {from} is now {id}");
+            let _ = out.send(Msg::Event(Event::new(now(), Some(id.clone()), Kind::ProjectAlias { from })));
+        }
+        let _ = git.send(git::Cmd::Root(root.clone(), id.clone()));
+        match self.roots.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, known)) => *known = id,
+            None => {
+                self.add_tree(&root, ex);
+                self.roots.push((root, id));
+            }
+        }
+    }
+
     fn project_of(&self, path: &Path) -> Option<&(PathBuf, String)> {
         self.roots.iter().filter(|(r, _)| path.starts_with(r)).max_by_key(|(r, _)| r.as_os_str().len())
     }
+}
+
+// A repo cloned inside a watched folder is its own project, as it is for agent edits.
+fn nested_repo(file: &Path, root: &Path) -> Option<Project> {
+    let repo = file.parent()?.ancestors().take_while(|a| *a != root).find(|a| a.join(".git").exists())?;
+    project_of(repo)
 }
 
 #[derive(Default)]
@@ -300,6 +322,44 @@ mod tests {
         assert!(orx.recv_timeout(Duration::from_secs(3)).is_err());
         let _ = fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn a_save_in_a_repo_inside_the_watched_folder_goes_to_that_repo() {
+        let base = std::env::temp_dir().join(format!("kairos-watch-nested-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("oasis/phone/src")).unwrap();
+        fs::create_dir_all(base.join("data")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let (outer, inner) = (base.join("oasis"), base.join("oasis/phone"));
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&inner).args(args).output().unwrap().status.success(), "git {args:?}");
+        run(&["init", "-q"]);
+        run(&["remote", "add", "origin", "https://github.com/ada/phone.git"]);
+        let (wtx, wrx) = mpsc::channel();
+        let (otx, orx) = mpsc::channel();
+        let (gtx, grx) = mpsc::channel();
+        spawn(wrx, wtx.clone(), otx, base.join("data"), gtx, Arc::new(Excluded::new(base.join("data"))));
+        wtx.send(Watch::Root(outer.clone(), "oasis".into())).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        fs::write(inner.join("src/a.rs"), "x").unwrap();
+        fs::write(outer.join("notes.txt"), "x").unwrap();
+        let mut got: Vec<(Option<String>, Kind)> = (0..2)
+            .map(|_| match orx.recv_timeout(Duration::from_secs(8)).unwrap() {
+                Msg::Event(e) => (e.project, e.kind),
+                _ => panic!("expected an event"),
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got, [
+            (Some("ada/phone".into()), Kind::FileSave { count: 1, paths: vec!["src/a.rs".into()] }),
+            (Some("oasis".into()), Kind::FileSave { count: 1, paths: vec!["notes.txt".into()] }),
+        ]);
+        let roots: Vec<PathBuf> = grx.try_iter().filter_map(|c| match c {
+            git::Cmd::Root(root, _) => Some(root),
+            _ => None,
+        }).collect();
+        assert_eq!(roots, [outer, inner], "the git watcher hears of the inner repo too");
+        let _ = fs::remove_dir_all(&base);
+    }
 }
 
 pub fn spawn(
@@ -340,20 +400,8 @@ pub fn spawn(
             match msg {
                 Ok(Watch::Root(root, id)) => {
                     let root = root.canonicalize().unwrap_or(root);
-                    if ex.covers(&root) {
-                        continue;
-                    }
-                    if let Some(from) = ids.observe(&root, &id, now()) {
-                        diag!("kairosd: project {from} is now {id}");
-                        let _ = out.send(Msg::Event(Event::new(now(), Some(id.clone()), Kind::ProjectAlias { from })));
-                    }
-                    let _ = git.send(git::Cmd::Root(root.clone(), id.clone()));
-                    match st.roots.iter_mut().find(|(r, _)| *r == root) {
-                        Some((_, known)) => *known = id,
-                        None => {
-                            st.add_tree(&root, &ex);
-                            st.roots.push((root, id));
-                        }
+                    if !ex.covers(&root) {
+                        st.add_root(root, id, &ex, &mut ids, &out, &git);
                     }
                 }
                 Ok(Watch::Fs(ev)) => {
@@ -371,7 +419,14 @@ pub fn spawn(
                         }
                         if path.is_dir() {
                             st.add_tree(&path, &ex);
-                        } else if let Some((root, id)) = st.project_of(&path) {
+                            continue;
+                        }
+                        if let Some(p) = st.project_of(&path).and_then(|(root, _)| nested_repo(&path, root)) {
+                            if !ex.covers(&p.root) {
+                                st.add_root(p.root, p.id, &ex, &mut ids, &out, &git);
+                            }
+                        }
+                        if let Some((root, id)) = st.project_of(&path) {
                             pending.entry(root.clone()).or_insert_with(|| (id.clone(), Saves::default())).1.add(path);
                             first.get_or_insert_with(Instant::now);
                             last = Instant::now();
