@@ -27,9 +27,9 @@ impl Person {
         let person = Person { on, busy: Arc::default(), log: Arc::default() };
         if on {
             ready()?;
-            // The system's idle clock starts with the display (or the last run's typing), and kairosd's first look
-            // reports that as input. Past 30 s it reads as nobody there, like a real start.
-            thread::sleep(Duration::from_secs(31));
+            // The system's idle clock starts with the display (or the last run's typing), and kairosd counts someone as
+            // there until 60 s after their last input. Past that it reads as nobody there, like a real start.
+            thread::sleep(Duration::from_secs(61));
             let p = person.clone();
             thread::spawn(move || loop {
                 if p.busy.load(Ordering::Relaxed) {
