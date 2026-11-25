@@ -590,6 +590,8 @@ fn run() -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 
+    // Its first nudge, which checks it can move the pointer, comes before kairosd watches.
+    let person = Person::new(args.window)?;
     let start = || daemon(&args, &p);
     let mut daemon = start()?;
     sleep(Duration::from_secs(2));
@@ -626,7 +628,6 @@ fn run() -> Result<bool> {
         daemon = start()?;
         Ok(())
     };
-    let person = Person::new(args.window)?;
     let drove = drive(h, &mut term, &model, &scenario, &person, Stage { restart: &mut restart, reopen: &mut reopen });
     // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
