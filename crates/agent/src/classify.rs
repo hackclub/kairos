@@ -34,6 +34,8 @@ const AGENT_APPS: &[&str] = &[
     // OpenCode's desktop app: `ai.opencode` on Linux (window class `ai.opencode.desktop`, the Mac bundle id too),
     // OpenCode.exe on Windows. Its CLI never owns a window, the terminal does.
     "opencode", "ai.opencode",
+    // On a Mac the Antigravity IDE's program is `Electron`, so only its bundle id `com.google.antigravity-ide` names it.
+    "com.google.antigravity",
 ];
 const AGENT_CLIS: &[&str] = &["claude", "codex", "opencode", "agy", "gemini", "qwen", "kilo", "copilot", "pi", "hermes", "amp"];
 const EDITORS: &[&str] = &[
@@ -544,6 +546,8 @@ mod tests {
         assert!(is_agent_app("codex", "com.openai.codex"));
         assert!(is_agent_app("ai.opencode", "ai.opencode.desktop"));
         assert!(is_agent_app("electron", "ai.opencode.desktop"));
+        assert!(is_agent_app("electron", "com.google.antigravity-ide"));
+        assert!(is_agent_app(&normalize("Antigravity IDE.exe"), ""));
         assert!(is_agent_app(&normalize("OpenCode.exe"), ""));
         assert!(!is_agent_app("claude", "kitty"));
         assert!(!is_agent_app("code", "code"));
