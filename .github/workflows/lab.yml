@@ -7,9 +7,14 @@ on:
     secrets:
       LAB_SLACK_WEBHOOK:
         required: false
+permissions:
+  contents: read
+  actions: read
 env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
+  # A ci run on main, to try its kairosd before it becomes a release.
+  CANDIDATE: ""
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
@@ -29,9 +34,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
-      - name: the released kairosd
+      - name: the kairosd to test
         shell: bash
         run: |
+          if [ -n "$CANDIDATE" ]; then
+            echo "kairosd from ci run $CANDIDATE"
+            GH_TOKEN=$GITHUB_TOKEN gh run download "$CANDIDATE" -R "$GITHUB_REPOSITORY" -n "kairos-${{ matrix.target }}" -D "dist/${{ matrix.target }}"
+            chmod +x dist/${{ matrix.target }}/kairosd*
+            exit 0
+          fi
           if [ -z "$KAIROS" ]; then
             KAIROS=$(curl -fsSL https://kairos.hackclub.com/download/latest/manifest.json | tr -d '\r\n' | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           fi
@@ -43,7 +54,9 @@ jobs:
       - name: every version (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: ci/all.sh ${{ matrix.target }} --real-home --window
+        # Sourced: a script started from Git Bash gets a parent Windows no longer knows, and Kairos walks the console's
+        # processes from parent to child.
+        run: . ci/all.sh ${{ matrix.target }} --real-home --window
       - name: every version (Linux)
         if: runner.os == 'Linux'
         run: |

@@ -81,29 +81,37 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Presses keys the way a person does: only at a screen that has held still for a second, then looks again.
+/// Presses keys the way a person does: a second after what asks for them came up, then looks again.
 struct Hands {
     last: String,
     since: Instant,
+    asked: Option<(usize, Instant)>,
 }
 
 impl Hands {
     fn new() -> Hands {
-        Hands { last: String::new(), since: Instant::now() }
+        Hands { last: String::new(), since: Instant::now(), asked: None }
     }
 
-    /// The screen and how long it has looked like this, after pressing the keys of the first rule that fits it.
+    /// The screen and how long it has looked like this, after pressing the keys of the first rule that fits it. A rule
+    /// has to fit for a second first (Claude Code's welcome screen never holds still), and again before a second press.
     fn look(&mut self, term: &mut Term, rules: &[Rule]) -> Result<(String, Duration)> {
         let screen = term.screen();
         if screen != self.last {
             (self.last, self.since) = (screen.clone(), Instant::now());
-        } else if self.since.elapsed() > Duration::from_secs(1) {
-            if let Some((_, keys)) = rules.iter().find(|(texts, _)| texts.iter().all(|t| screen.contains(t))) {
-                for k in *keys {
-                    term.send(k)?;
+        }
+        let fits = rules.iter().position(|(texts, _)| texts.iter().all(|t| screen.contains(t)));
+        match (fits, self.asked) {
+            (Some(i), Some((j, at))) if i == j => {
+                if at.elapsed() > Duration::from_secs(1) {
+                    for k in rules[i].1 {
+                        term.send(k)?;
+                    }
+                    (self.asked, self.since) = (Some((i, Instant::now())), Instant::now());
                 }
-                self.since = Instant::now();
             }
+            (Some(i), _) => self.asked = Some((i, Instant::now())),
+            (None, _) => self.asked = None,
         }
         Ok((screen, self.since.elapsed()))
     }
