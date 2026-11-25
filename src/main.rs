@@ -117,10 +117,9 @@ impl Hands {
     }
 }
 
-fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, restart: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+fn ready(h: &Harness, term: &mut Term, hands: &mut Hands) -> Result<()> {
     // Codex shows its prompt for a moment before the trust question, so the prompt has to be up and holding still.
     let until = Instant::now() + Duration::from_secs(90);
-    let mut hands = Hands::new();
     loop {
         if term.exited() {
             bail!("{} quit before its prompt came up. Screen:\n{}", h.id, term.screen());
@@ -130,16 +129,43 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, resta
         }
         let (screen, still) = hands.look(term, h.first_run)?;
         if h.ready.iter().any(|r| screen.contains(r)) && still > Duration::from_secs(2) {
-            break;
+            return Ok(());
         }
         sleep(Duration::from_millis(200));
     }
+}
+
+struct Stage<'a> {
+    /// Stops kairosd and starts it again.
+    restart: &'a mut dyn FnMut() -> Result<()>,
+    /// Starts the harness again on its last session.
+    reopen: &'a mut dyn FnMut() -> Result<Term>,
+}
+
+fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage: Stage) -> Result<()> {
+    let mut hands = Hands::new();
+    ready(h, term, &mut hands)?;
     for (i, turn) in scenario.turns.iter().enumerate() {
         if turn.restart {
             // Long enough for kairosd to have read and written the turn before.
             sleep(Duration::from_secs(6));
-            restart()?;
+            (stage.restart)()?;
             sleep(Duration::from_secs(4));
+        }
+        if turn.reopen {
+            // Ctrl+C twice, the way out every one of them takes.
+            for _ in 0..2 {
+                term.send("\x03")?;
+                sleep(Duration::from_millis(400));
+            }
+            let until = Instant::now() + Duration::from_secs(8);
+            while !term.exited() && Instant::now() < until {
+                sleep(Duration::from_millis(200));
+            }
+            term.kill();
+            *term = (stage.reopen)()?;
+            hands = Hands::new();
+            ready(h, term, &mut hands)?;
         }
         model.arm(i);
         term.type_text(turn.prompt)?;
@@ -349,34 +375,38 @@ fn run() -> Result<bool> {
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(&home, &project, &url, &version)?;
-    // npm's launchers on Windows are batch files, which only cmd can start.
-    let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
-        let mut cmd = CommandBuilder::new("cmd.exe");
-        cmd.arg("/c");
-        cmd.arg(&bin);
-        cmd
-    } else {
-        CommandBuilder::new(&bin)
+    let open = |args: &[String], raw: &str| -> Result<Term> {
+        // npm's launchers on Windows are batch files, which only cmd can start.
+        let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            cmd.arg("/c");
+            cmd.arg(&bin);
+            cmd
+        } else {
+            CommandBuilder::new(&bin)
+        };
+        cmd.args(args);
+        cmd.cwd(&project);
+        cmd.env("HOME", &home);
+        cmd.env("USERPROFILE", &home);
+        cmd.env("TERM", "xterm-256color");
+        for k in STRAY_ENV {
+            cmd.env_remove(k);
+        }
+        for (k, v) in &launch.env {
+            cmd.env(k, v);
+        }
+        Term::spawn(cmd, &run.join(raw))
     };
-    cmd.args(&launch.args);
-    cmd.cwd(&project);
-    cmd.env("HOME", &home);
-    cmd.env("USERPROFILE", &home);
-    cmd.env("TERM", "xterm-256color");
-    for k in STRAY_ENV {
-        cmd.env_remove(k);
-    }
-    for (k, v) in &launch.env {
-        cmd.env(k, v);
-    }
-    let mut term = Term::spawn(cmd, &run.join("pty.raw"))?;
+    let mut term = open(&launch.args, "pty.raw")?;
+    let mut reopen = || open(&launch.resume, "pty2.raw");
     let mut restart = || -> Result<()> {
         let _ = daemon.kill();
         let _ = daemon.wait();
         daemon = start()?;
         Ok(())
     };
-    let drove = drive(h, &mut term, &model, &scenario, &mut restart);
+    let drove = drive(h, &mut term, &model, &scenario, Stage { restart: &mut restart, reopen: &mut reopen });
     // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
     fs::write(run.join("screen.txt"), term.screen())?;

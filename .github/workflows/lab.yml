@@ -109,5 +109,9 @@ jobs:
           HOOK: ${{ secrets.LAB_SLACK_WEBHOOK }}
         run: |
           [ -n "$HOOK" ] || { echo "no LAB_SLACK_WEBHOOK secret"; exit 1; }
-          wrong=$(for f in results/*/result.txt; do t=${f#results/result-}; grep -E -A 4 "^(FAIL|lab: .* (quit|never))" "$f" | grep -v "^lab: .*run folder" | cut -c 1-300 | sed "s|^|${t%/result.txt}  |"; done | head -40)
+          # The failed runs and what was wrong, without the screens.
+          wrong=$(for f in results/*/result.txt; do
+            t=${f#results/result-}
+            awk '/^FAIL/ { f = 1; print; next } /^lab: .*(quit|never|failed|could not)/ { f = 0; sub(/ Screen:$/, ""); print; next } /^  / && f { print; next } { f = 0 }' "$f" | cut -c 1-300 | sed "s|^|${t%/result.txt}  |"
+          done | head -40)
           jq -n --arg t "Harness lab is red: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"$'\n```\n'"$wrong"$'\n```' '{text: $t}' | curl -fsS -X POST -H 'Content-type: application/json' --data @- "$HOOK"

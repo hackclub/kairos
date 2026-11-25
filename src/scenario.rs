@@ -14,6 +14,8 @@ pub struct Turn {
     pub say: &'static str,
     /// kairosd is stopped and started again before this turn, the way an update does it.
     pub restart: bool,
+    /// The harness is closed and opened again on the same session before this turn.
+    pub reopen: bool,
 }
 
 pub struct Scenario {
@@ -100,14 +102,16 @@ pub fn basic() -> Scenario {
                 ],
                 say: "Done. I wrote hello.py, changed the greeting and committed it.",
                 restart: false,
+                reopen: false,
             },
             Turn {
                 prompt: "now greet one more name and leave it uncommitted",
                 acts: vec![Act::Edit { path: "hello.py", old: "print(greet(\"lab\"))", new: "print(greet(\"lab!\"))\nprint(greet(\"again\"))" }],
                 say: "Added one more greeting.",
                 restart: false,
+                reopen: false,
             },
-            Turn { prompt: "what does hello.py print when it runs?", acts: vec![], say: "It prints four greetings, one on each line.", restart: false },
+            Turn { prompt: "what does hello.py print when it runs?", acts: vec![], say: "It prints four greetings, one on each line.", restart: false, reopen: false },
             Turn {
                 prompt: "move the names into a small module in a folder called pkg",
                 acts: vec![
@@ -116,12 +120,21 @@ pub fn basic() -> Scenario {
                 ],
                 say: "The names are in pkg/util.py now.",
                 restart: false,
+                reopen: false,
             },
             Turn {
                 prompt: "commit that please",
                 acts: vec![Act::Shell { cmd: "git add -A" }, Act::Shell { cmd: "git commit -m \"add util\"" }],
                 say: "Committed.",
                 restart: true,
+                reopen: false,
+            },
+            Turn {
+                prompt: "add one more small module next to it and leave it uncommitted",
+                acts: vec![Act::Write { path: "pkg/more.py", content: "MORE = [\"again\"]\nLAST = \"util\"\n" }],
+                say: "Added pkg/more.py.",
+                restart: false,
+                reopen: true,
             },
         ],
     }

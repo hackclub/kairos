@@ -13,6 +13,8 @@ pub type Rule = (&'static [&'static str], &'static [&'static str]);
 
 pub struct Launch {
     pub args: Vec<String>,
+    /// The arguments that open its last session in this folder again.
+    pub resume: Vec<String>,
     pub env: Vec<(String, String)>,
     /// Arguments for one more call of the program once the run is over, to stop what it left running.
     pub after: Vec<String>,
@@ -53,6 +55,9 @@ pub const ALL: &[Harness] = &[
             (&["❯ No, exit", "Yes, I trust this folder"], &[DOWN]),
             (&["❯ Yes, I trust this folder"], &[ENTER]),
             (&["Do you trust the files in this folder?", "❯ 1. Yes, proceed"], &[ENTER]),
+            // Asked when a session is opened again. Auto mode needs Anthropic's own servers.
+            (&["❯ No, keep accept edits"], &[ENTER]),
+            (&["Make auto mode your default permission mode?", "❯ Yes, set auto mode"], &[DOWN]),
             // Asked in Apple's Terminal, where it would change the terminal's own settings.
             (&["❯ 2. No, maybe later with /terminal-setup"], &[ENTER]),
             (&["No, maybe later with /terminal-setup"], &[DOWN]),
@@ -102,7 +107,7 @@ fn claude(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Resu
         ("DISABLE_AUTOUPDATER", "1"),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ];
-    Ok(Launch { args: Vec::new(), env: vars(&env), after: Vec::new() })
+    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new() })
 }
 
 fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -117,7 +122,7 @@ fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result
         project.display()
     );
     fs::write(dir.join("config.toml"), config)?;
-    Ok(Launch { args: Vec::new(), env: vars(&[("LAB_KEY", "lab")]), after: Vec::new() })
+    Ok(Launch { args: Vec::new(), resume: vec!["resume".to_string(), "--last".to_string()], env: vars(&[("LAB_KEY", "lab")]), after: Vec::new() })
 }
 
 fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Result<Launch> {
@@ -134,7 +139,8 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
         (json!({ "model": "lab/test-model", "providers": { "lab": lab } }), vec!["--auto".to_string()], vec!["service".to_string(), "stop".to_string()])
     };
     fs::write(dir.join("opencode.json"), serde_json::to_string_pretty(&config)?)?;
-    Ok(Launch { args, env: vars(&[("LAB_KEY", "lab")]), after })
+    let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
+    Ok(Launch { args, resume, env: vars(&[("LAB_KEY", "lab")]), after })
 }
 
 pub fn find(id: &str) -> Result<&'static Harness> {
