@@ -154,24 +154,47 @@ fn npm() -> Command {
 }
 
 impl Harness {
-    fn newest(&self) -> Result<String> {
-        let version = match self.source {
-            Source::Npm(package) => output(npm().args(["view", package, "version"]))?,
-            Source::Github(repo) => {
-                let latest = output(Command::new("curl").args(["-fsSL", &format!("https://api.github.com/repos/{repo}/releases/latest")]))?;
-                let latest: Value = serde_json::from_str(&latest).context("GitHub's latest release")?;
-                latest["tag_name"].as_str().unwrap_or_default().trim_start_matches('v').to_string()
+    /// `latest` is what the harness hands out as its newest, `2.x` the highest 2 it has released.
+    fn newest(&self, want: &str) -> Result<String> {
+        let major = want.strip_suffix(".x");
+        let version = match (&self.source, major) {
+            (Source::Npm(package), None) => output(npm().args(["view", package, "version"]))?,
+            (Source::Npm(package), Some(m)) => {
+                let all = output(npm().args(["view", &format!("{package}@{m}"), "version", "--json"]))?;
+                match serde_json::from_str(&all).context("npm's version list")? {
+                    Value::Array(a) => a.last().and_then(Value::as_str).unwrap_or_default().to_string(),
+                    one => one.as_str().unwrap_or_default().to_string(),
+                }
+            }
+            (Source::Github(repo), _) => {
+                let mut curl = Command::new("curl");
+                curl.arg("-fsSL");
+                // Runners share addresses, and GitHub turns away their unsigned requests.
+                if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                    curl.args(["-H", &format!("Authorization: Bearer {token}")]);
+                }
+                let all = output(curl.arg(format!("https://api.github.com/repos/{repo}/releases?per_page=100")))?;
+                let all: Value = serde_json::from_str(&all).context("GitHub's releases")?;
+                let numbers = |r: &Value| -> Option<Vec<u64>> {
+                    if r["prerelease"] == true || r["draft"] == true {
+                        return None;
+                    }
+                    let n: Vec<u64> = r["tag_name"].as_str()?.strip_prefix('v')?.split('.').map(str::parse).collect::<Result<_, _>>().ok()?;
+                    (n.len() == 3 && major.is_none_or(|m| n[0].to_string() == m)).then_some(n)
+                };
+                let top = all.as_array().into_iter().flatten().filter_map(numbers).max().unwrap_or_default();
+                top.iter().map(u64::to_string).collect::<Vec<_>>().join(".")
             }
         };
         if version.is_empty() {
-            bail!("could not find the newest {}", self.id);
+            bail!("could not find the newest {} for {want:?}", self.id);
         }
         Ok(version)
     }
 
     /// Installs one exact version into its own folder and gives back the program and the version.
     pub fn install(&self, version: &str, tools: &Path) -> Result<(PathBuf, String)> {
-        let version = if version == "latest" { self.newest()? } else { version.to_string() };
+        let version = if version == "latest" || version.ends_with(".x") { self.newest(version)? } else { version.to_string() };
         let dir = tools.join(format!("{}-{version}", self.id));
         let bin = match self.source {
             Source::Npm(_) => dir.join("node_modules").join(".bin").join(if cfg!(windows) { format!("{}.cmd", self.bin) } else { self.bin.to_string() }),

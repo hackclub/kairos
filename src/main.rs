@@ -19,7 +19,7 @@ use model::Model;
 use scenario::Scenario;
 use term::{Term, ENTER};
 
-const USAGE: &str = "usage: lab run <harness> [version|latest] --kairosd PATH [--work DIR] [--save DIR] [--real-home]";
+const USAGE: &str = "usage: lab run <harness> [version|latest|N.x] --kairosd PATH [--work DIR] [--save DIR] [--real-home] [--window]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
 const STRAY_ENV: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -41,11 +41,13 @@ struct Args {
     work: PathBuf,
     save: Option<PathBuf>,
     real_home: bool,
+    /// The lab runs in the terminal window in front, so Kairos has to see the agent there.
+    window: bool,
 }
 
 fn args() -> Result<Args> {
     let mut words = Vec::new();
-    let (mut kairosd, mut work, mut save, mut real_home) = (None, PathBuf::from("work"), None, false);
+    let (mut kairosd, mut work, mut save, mut real_home, mut window) = (None, PathBuf::from("work"), None, false, false);
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -53,6 +55,7 @@ fn args() -> Result<Args> {
             "--work" => work = it.next().map(PathBuf::from).context(USAGE)?,
             "--save" => save = it.next().map(PathBuf::from),
             "--real-home" => real_home = true,
+            "--window" => window = true,
             _ => words.push(a),
         }
     }
@@ -66,6 +69,7 @@ fn args() -> Result<Args> {
         work,
         save,
         real_home,
+        window,
     })
 }
 
@@ -168,6 +172,32 @@ fn differ(problems: &mut Vec<String>, turn: usize, what: &str, got: &Value, want
 }
 
 /// Compares what Kairos recorded with what the script did, and the script with what is on disk.
+/// A person watching the terminal the whole session: from the first prompt to the last reply the window in front is an
+/// agent in a terminal, in the project.
+fn front(all: &[Value], harness: &str) -> Vec<String> {
+    let of = |kind: &str| -> Vec<f64> { all.iter().filter(|e| e["harness"] == harness && e["kind"] == kind).filter_map(|e| e["ts"].as_f64()).collect() };
+    let (Some(&from), Some(&to)) = (of("prompt").first(), of("reply_done").last()) else {
+        return Vec::new();
+    };
+    let want = (json!("agent_terminal"), json!("proj"));
+    let mut problems = Vec::new();
+    let mut before = None;
+    for e in all.iter().filter(|e| e["kind"] == "focus") {
+        let (ts, seen) = (e["ts"].as_f64().unwrap_or(0.0), (e["class"].clone(), e["project"].clone()));
+        if ts <= from {
+            before = Some(seen);
+        } else if ts <= to && seen != want {
+            problems.push(format!("{:.1} s after the first prompt the window in front became {} in project {}", ts - from, seen.0, seen.1));
+        }
+    }
+    match before {
+        Some(seen) if seen == want => {}
+        Some(seen) => problems.push(format!("at the first prompt the window in front was {} in project {}, not agent_terminal in proj", seen.0, seen.1)),
+        None => problems.push("Kairos reported no window before the first prompt".to_string()),
+    }
+    problems
+}
+
 fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project: &Path) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
@@ -337,6 +367,9 @@ fn run() -> Result<bool> {
     }
     let _ = daemon.kill();
     let _ = daemon.wait();
+    // Codex leaves a server running from the run's own home.
+    #[cfg(unix)]
+    let _ = Command::new("pkill").arg("-f").arg(&run).status();
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
     fs::write(run.join("requests.jsonl"), requests)?;
     // What Kairos read, kept next to the run so a wrong event can be traced to the line it came from.
@@ -355,6 +388,9 @@ fn run() -> Result<bool> {
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
     problems.extend(check(h, &version, &scenario, &all, &project)?);
+    if args.window {
+        problems.extend(front(&all, h.id));
+    }
     for e in &mine {
         println!("{e}");
     }

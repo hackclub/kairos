@@ -10,15 +10,16 @@ on:
 env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
+  GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: linux-x86_64, exe: "", home: "" }
-          - { os: windows-latest, target: windows-x86_64, exe: ".exe", home: "--real-home" }
-          - { os: macos-latest, target: macos-aarch64, exe: "", home: "" }
+          - { os: ubuntu-latest, target: linux-x86_64 }
+          - { os: windows-latest, target: windows-x86_64 }
+          - { os: macos-latest, target: macos-aarch64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -38,20 +39,33 @@ jobs:
           curl -fsSL -o dist.tgz "https://github.com/hackclub/kairos/releases/download/v$KAIROS/kairos-dist-$KAIROS.tar.gz"
           mkdir dist
           tar -xzf dist.tgz -C dist
-      - name: every supported version and the newest
+      # Each run happens in a terminal window in front, where Kairos has to find the agent.
+      - name: every version (Windows)
+        if: runner.os == 'Windows'
         shell: bash
+        run: ci/all.sh ${{ matrix.target }} --real-home --window
+      - name: every version (Linux)
+        if: runner.os == 'Linux'
         run: |
-          failed=0
-          tr -d '\r' < versions.txt > runs.txt
-          cut -d ' ' -f 1 runs.txt | sort -u | sed '/^$/d; s/$/ latest/' >> runs.txt
-          while read -r harness version; do
-            [ -z "$harness" ] && continue
-            ./target/release/lab${{ matrix.exe }} run "$harness" "$version" --kairosd "dist/${{ matrix.target }}/kairosd${{ matrix.exe }}" ${{ matrix.home }} > out.txt 2>&1 || failed=1
-            if grep -E "^(PASS|FAIL|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
-            cat part.txt >> result.txt
-            rm -rf work/tools
-          done < runs.txt
-          exit $failed
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends xvfb openbox xterm x11-utils
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x800x24 > /dev/null 2>&1 &
+          for i in $(seq 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done
+          openbox > /dev/null 2>&1 &
+          for i in $(seq 50); do xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break; sleep 0.2; done
+          xterm -e ci/all.sh ${{ matrix.target }} --window
+          cat result.txt
+          exit "$(cat failed.txt)"
+      - name: every version (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
+          chmod +x "$RUNNER_TEMP/run.command"
+          open -a Terminal "$RUNNER_TEMP/run.command"
+          for i in $(seq 1500); do [ -f failed.txt ] && break; sleep 2; done
+          cat result.txt
+          exit "$(cat failed.txt)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
