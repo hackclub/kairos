@@ -31,6 +31,9 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_EVERY: Duration = Duration::from_secs(600);
 /// A setup that stays the same is still recorded this often, so any stretch of time has one to go by.
 const SETUP_AGAIN: Duration = Duration::from_secs(6 * 3600);
+/// Getting wakatime-cli again after a failed try, doubling each time up to `INSTALL_RETRY_MAX`.
+const INSTALL_RETRY: Duration = Duration::from_secs(600);
+const INSTALL_RETRY_MAX: Duration = Duration::from_secs(6 * 3600);
 
 pub fn url() -> String {
     format!("http://127.0.0.1:{API_PORT}/shadow/v1")
@@ -106,7 +109,24 @@ pub fn spawn(shadow: Arc<Shadow>, data: PathBuf, bound: Arc<AtomicBool>, tx: Sen
         let mut versions = Versions::default();
         let mut setup = None;
         let mut failed = None;
+        let (mut install_at, mut install_failures) = (Instant::now(), 0);
         loop {
+            // In this thread, so a newer wakatime-cli never goes in while the shadow is running the old one.
+            if Instant::now() >= install_at {
+                match wakatime_cli::install(&data) {
+                    Ok(placed) => {
+                        install_failures = 0;
+                        if let Some(cli) = placed {
+                            diag!("kairosd: put wakatime-cli {} at {}", wakatime_cli::VERSION, cli.display());
+                        }
+                    }
+                    Err(e) => {
+                        install_failures += 1;
+                        install_at = Instant::now() + install_retry(install_failures);
+                        diag!("kairosd: could not get wakatime-cli: {e:#}");
+                    }
+                }
+            }
             let cli = wakatime_cli::find();
             let bound_now = bound.load(Ordering::Relaxed);
             let seen = Kind::WakatimeSetup {
@@ -143,6 +163,10 @@ pub fn spawn(shadow: Arc<Shadow>, data: PathBuf, bound: Arc<AtomicBool>, tx: Sen
             }
         }
     });
+}
+
+fn install_retry(failures: u32) -> Duration {
+    INSTALL_RETRY.saturating_mul(1 << failures.saturating_sub(1).min(6)).min(INSTALL_RETRY_MAX)
 }
 
 /// Whether editor heartbeats reach Kairos: it holds the config wakatime-cli reads and that still points here.
@@ -249,6 +273,15 @@ mod tests {
         let (cli, dir) = (Path::new("/w/wakatime-cli"), Path::new("/w/hackatime-ai"));
         assert_eq!(var(&command(cli, dir, None)), None, "kairosd's own environment as it is");
         assert_eq!(var(&command(cli, dir, Some(Path::new("/home/u/.claude-work")))), Some(Some("/home/u/.claude-work".into())));
+    }
+
+    #[test]
+    fn getting_wakatime_cli_again_backs_off() {
+        assert_eq!(install_retry(1), INSTALL_RETRY);
+        assert_eq!(install_retry(2), INSTALL_RETRY * 2);
+        assert_eq!(install_retry(6), INSTALL_RETRY * 32);
+        assert_eq!(install_retry(7), INSTALL_RETRY_MAX);
+        assert_eq!(install_retry(u32::MAX), INSTALL_RETRY_MAX);
     }
 
     #[test]

@@ -926,6 +926,8 @@ pub fn install(args: &[String]) -> Result<()> {
     } else if pasted || oauth.is_some() {
         crate::editors::add_missing();
     }
+    // No editor plugin may ever bring wakatime-cli, and kairosd tries again by itself if this fails.
+    let _ = kairos_core::wakatime_cli::install(&data);
 
     let kairos = dir.join(exe("kairos"));
     let signed_in = saved::load(&data);

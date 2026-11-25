@@ -2,12 +2,13 @@
 //! people who don't have it yet.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::update::sha256_hex;
 
@@ -24,6 +25,18 @@ const SUMS: [(&str, &str); 6] = [
 ];
 const RELEASES: &str = "https://github.com/wakatime/wakatime-cli/releases/download";
 const MAX_ZIP: u64 = 32 << 20;
+/// In Kairos's data folder: the wakatime-cli [`install`] put in place, the only one it ever replaces.
+const PLACED: &str = "wakatime-cli.json";
+/// `kairos install` and kairosd may both find none at once.
+const LOCK: &str = "wakatime-cli.lock";
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Placed {
+    path: PathBuf,
+    version: String,
+    /// Of the program, since a plugin that updates it writes over the same file.
+    sha256: String,
+}
 
 /// wakatime-cli's name for this computer (`GOOS-GOARCH`), for the ones Kairos runs on.
 pub fn platform() -> Option<&'static str> {
@@ -70,19 +83,78 @@ fn find_in(dir: &Path, path: Option<&OsStr>, platform: &str) -> Option<PathBuf> 
         .find(|f| f.is_file())
 }
 
-/// Gets the official wakatime-cli into [`resources_dir`], where plugins look for it, unless one is already there.
-pub fn install() -> Result<PathBuf> {
-    install_in(&resources_dir().context("cannot find your home folder")?)
+/// Gets the official wakatime-cli into [`resources_dir`], where plugins look for it, when the person has none, and puts
+/// [`VERSION`] in place of an older one it got before. One Kairos didn't put there is never touched: plugins keep theirs
+/// up to date. The one it put in place, if it did.
+pub fn install(data: &Path) -> Result<Option<PathBuf>> {
+    let platform = platform().context("wakatime-cli has no build for this computer")?;
+    let dir = resources_dir().context("cannot find your home folder")?;
+    install_with(data, &dir, std::env::var_os("PATH").as_deref(), platform, sum(platform), &|| download(platform))
 }
 
-/// [`install`], into `dir`.
+fn install_with(data: &Path, dir: &Path, path: Option<&OsStr>, platform: &str, sum: &str, get: &dyn Fn() -> Result<Vec<u8>>) -> Result<Option<PathBuf>> {
+    let name = file_name(platform);
+    let dest = dir.join(&name);
+    let _lock = lock(data)?;
+    #[cfg(windows)]
+    let _ = fs::remove_file(aside(&dest));
+    let over = match find_in(dir, path, platform) {
+        None => false,
+        Some(found) => {
+            let Some(p) = placed(data).filter(|p| p.path == dest && found == dest && newer(VERSION, &p.version)) else {
+                return Ok(None);
+            };
+            if fs::read(&dest).map(|b| sha256_hex(&b)).ok() != Some(p.sha256) {
+                let _ = fs::remove_file(data.join(PLACED));
+                return Ok(None);
+            }
+            true
+        }
+    };
+    let Some(sha256) = place(&get()?, sum, &name, dir, over)? else {
+        return Ok(None);
+    };
+    record(data, &Placed { path: dest.clone(), version: VERSION.to_string(), sha256 })?;
+    Ok(Some(dest))
+}
+
+/// The official wakatime-cli in `dir`, got unless one is there, with no record of it.
 pub fn install_in(dir: &Path) -> Result<PathBuf> {
     let platform = platform().context("wakatime-cli has no build for this computer")?;
     let dest = dir.join(file_name(platform));
-    if dest.is_file() {
-        return Ok(dest);
+    if !dest.is_file() {
+        place(&download(platform)?, sum(platform), &file_name(platform), dir, false)?;
     }
-    place(&download(platform)?, sum(platform), &file_name(platform), dir)
+    Ok(dest)
+}
+
+fn newer(a: &str, b: &str) -> bool {
+    let v = |s: &str| semver::Version::parse(s.trim_start_matches('v')).ok();
+    matches!((v(a), v(b)), (Some(a), Some(b)) if a > b)
+}
+
+fn placed(data: &Path) -> Option<Placed> {
+    serde_json::from_str(&fs::read_to_string(data.join(PLACED)).ok()?).ok()
+}
+
+fn record(data: &Path, placed: &Placed) -> Result<()> {
+    let target = data.join(PLACED);
+    let tmp = target.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(placed)?).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &target).with_context(|| format!("writing {}", target.display()))
+}
+
+fn lock(data: &Path) -> Result<File> {
+    fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
+    let path = data.join(LOCK);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock().with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
 }
 
 fn download(platform: &str) -> Result<Vec<u8>> {
@@ -105,7 +177,9 @@ fn sum(platform: &str) -> &'static str {
     SUMS.iter().find(|(p, _)| *p == platform).map_or("", |(_, s)| s)
 }
 
-fn place(zip: &[u8], sum: &str, name: &str, dir: &Path) -> Result<PathBuf> {
+/// Puts the program from the zip in `dir`: over the one there when `over`, else only while there is still none. Its
+/// checksum, none when another one turned up first.
+fn place(zip: &[u8], sum: &str, name: &str, dir: &Path, over: bool) -> Result<Option<String>> {
     if sha256_hex(zip) != sum {
         bail!("the downloaded wakatime-cli is not the one Kairos expects, so it was not used");
     }
@@ -113,14 +187,53 @@ fn place(zip: &[u8], sum: &str, name: &str, dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let dest = dir.join(name);
     let tmp = dir.join(format!("{name}.kairos-tmp"));
-    fs::write(&tmp, &bin).with_context(|| format!("writing {}", tmp.display()))?;
+    let moved = write_program(&tmp, &bin).and_then(|()| {
+        if over {
+            swap_in(&tmp, &dest).map(|()| true)
+        } else if dest.exists() {
+            Ok(false)
+        } else {
+            fs::rename(&tmp, &dest).map(|()| true)
+        }
+    });
+    if !matches!(moved, Ok(true)) {
+        let _ = fs::remove_file(&tmp);
+    }
+    Ok(moved.with_context(|| format!("writing {}", dest.display()))?.then(|| sha256_hex(&bin)))
+}
+
+fn write_program(path: &Path, bin: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bin)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).with_context(|| format!("writing {}", tmp.display()))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
-    fs::rename(&tmp, &dest).with_context(|| format!("writing {}", dest.display()))?;
-    Ok(dest)
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn swap_in(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, dest)
+}
+
+/// Windows can't write over a program while it runs (a plugin may be running this one), but it can move it aside, and
+/// the next [`install`] deletes it.
+#[cfg(windows)]
+fn swap_in(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    let old = aside(dest);
+    fs::rename(dest, &old)?;
+    if let Err(e) = fs::rename(tmp, dest) {
+        let _ = fs::rename(&old, dest);
+        return Err(e);
+    }
+    let _ = fs::remove_file(&old);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn aside(dest: &Path) -> PathBuf {
+    dest.with_extension("exe.kairos-old")
 }
 
 /// The file called `name` in a zip whose checksum was already checked, so only what that zip needs is read: stored or deflated
@@ -280,16 +393,21 @@ mod tests {
         let zip = zip_of(&[("README.md", b"hello", false), ("wakatime-cli-linux-amd64", &program, true)]);
         let good = sha256_hex(&zip);
 
-        assert!(place(&zip, &"0".repeat(64), "wakatime-cli-linux-amd64", &d.0).is_err());
+        assert!(place(&zip, &"0".repeat(64), "wakatime-cli-linux-amd64", &d.0, false).is_err());
         assert!(!d.0.join("wakatime-cli-linux-amd64").exists(), "a zip with another checksum is never unpacked");
 
-        let dest = place(&zip, &good, "wakatime-cli-linux-amd64", &d.0).unwrap();
+        let dest = d.0.join("wakatime-cli-linux-amd64");
+        assert_eq!(place(&zip, &good, "wakatime-cli-linux-amd64", &d.0, false).unwrap(), Some(sha256_hex(&program)));
         assert_eq!(fs::read(&dest).unwrap(), program);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
         }
+        assert_eq!(fs::read_dir(&d.0).unwrap().count(), 1, "no temp file left");
+        fs::write(&dest, "one that turned up during the download").unwrap();
+        assert_eq!(place(&zip, &good, "wakatime-cli-linux-amd64", &d.0, false).unwrap(), None);
+        assert_eq!(fs::read(&dest).unwrap(), b"one that turned up during the download");
         assert_eq!(fs::read_dir(&d.0).unwrap().count(), 1, "no temp file left");
 
         assert_eq!(unzip_one(&zip, "README.md").unwrap(), b"hello");
@@ -301,14 +419,147 @@ mod tests {
         assert!(unzip_one(b"not a zip at all, just some bytes", "x").is_err());
     }
 
+    fn release(program: &[u8]) -> (Vec<u8>, String) {
+        let zip = zip_of(&[("wakatime-cli-linux-amd64", program, true)]);
+        let sum = sha256_hex(&zip);
+        (zip, sum)
+    }
+
+    /// [`install_with`] on `d`'s data and resources folders. What it did, and how many times it downloaded.
+    fn install_from(d: &Dir, zip: &[u8], sum: &str, path: Option<&OsStr>) -> (Result<Option<PathBuf>>, u32) {
+        let gets = std::cell::Cell::new(0);
+        let get = || -> Result<Vec<u8>> {
+            gets.set(gets.get() + 1);
+            Ok(zip.to_vec())
+        };
+        let done = install_with(&d.0.join("data"), &d.0.join("res"), path, "linux-amd64", sum, &get);
+        (done, gets.get())
+    }
+
+    fn files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> =
+            fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn with_none_found_the_official_one_is_got_and_recorded() {
+        let d = Dir::new("none");
+        let (data, dest) = (d.0.join("data"), d.0.join("res").join("wakatime-cli-linux-amd64"));
+        let program = b"\x7fELF wakatime-cli ".repeat(100);
+        let (zip, sum) = release(&program);
+
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (Some(dest.clone()), 1));
+        assert_eq!(fs::read(&dest).unwrap(), program);
+        assert_eq!(files(&d.0.join("res")), ["wakatime-cli-linux-amd64"], "no temp file left");
+        assert_eq!(placed(&data), Some(Placed { path: dest.clone(), version: VERSION.into(), sha256: sha256_hex(&program) }));
+
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (None, 0), "its own, already the version it gets");
+    }
+
+    #[test]
+    fn a_wakatime_cli_kairos_didnt_put_there_is_never_touched() {
+        let d = Dir::new("theirs");
+        let (data, res, bin) = (d.0.join("data"), d.0.join("res"), d.0.join("bin"));
+        let dest = res.join("wakatime-cli-linux-amd64");
+        let (zip, sum) = release(b"the one Kairos gets");
+
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("wakatime-cli"), "on the PATH").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+        let (done, gets) = install_from(&d, &zip, &sum, Some(&path));
+        assert_eq!((done.unwrap(), gets), (None, 0));
+        assert!(!res.exists());
+
+        fs::create_dir_all(&res).unwrap();
+        fs::write(&dest, "a plugin's").unwrap();
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (None, 0));
+
+        // Kairos put an older one here, and a plugin has updated it since.
+        record(&data, &Placed { path: dest.clone(), version: "v2.0.0".into(), sha256: sha256_hex(b"Kairos's older one") }).unwrap();
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (None, 0));
+        assert_eq!(fs::read(&dest).unwrap(), b"a plugin's");
+        assert_eq!(placed(&data), None, "the plugin's from now on");
+    }
+
+    #[test]
+    fn only_an_older_one_kairos_put_there_is_replaced() {
+        let d = Dir::new("older");
+        let (data, res) = (d.0.join("data"), d.0.join("res"));
+        let dest = res.join("wakatime-cli-linux-amd64");
+        let program = b"\x7fELF the pinned wakatime-cli ".repeat(100);
+        let (zip, sum) = release(&program);
+        fs::create_dir_all(&res).unwrap();
+        fs::create_dir_all(&data).unwrap();
+
+        fs::write(&dest, "Kairos's from a later release").unwrap();
+        record(&data, &Placed { path: dest.clone(), version: "v99.0.0".into(), sha256: sha256_hex(b"Kairos's from a later release") }).unwrap();
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (None, 0), "never an older one over a newer one");
+
+        fs::write(&dest, "Kairos's older one").unwrap();
+        record(&data, &Placed { path: dest.clone(), version: "v2.0.0".into(), sha256: sha256_hex(b"Kairos's older one") }).unwrap();
+        let (done, gets) = install_from(&d, &zip, &sum, None);
+        assert_eq!((done.unwrap(), gets), (Some(dest.clone()), 1));
+        assert_eq!(fs::read(&dest).unwrap(), program);
+        assert_eq!(files(&res), ["wakatime-cli-linux-amd64"], "nothing left beside it");
+        assert_eq!(placed(&data), Some(Placed { path: dest, version: VERSION.into(), sha256: sha256_hex(&program) }));
+    }
+
+    #[test]
+    fn a_download_with_another_checksum_leaves_nothing_behind() {
+        let d = Dir::new("bad");
+        let (data, res) = (d.0.join("data"), d.0.join("res"));
+        let dest = res.join("wakatime-cli-linux-amd64");
+        let (zip, _) = release(b"changed after Kairos was built");
+
+        let (done, gets) = install_from(&d, &zip, &"0".repeat(64), None);
+        assert!(done.is_err());
+        assert_eq!(gets, 1);
+        assert_eq!(files(&res), Vec::<String>::new());
+        assert_eq!(placed(&data), None);
+
+        fs::create_dir_all(&res).unwrap();
+        fs::write(&dest, "Kairos's older one").unwrap();
+        let older = Placed { path: dest.clone(), version: "v2.0.0".into(), sha256: sha256_hex(b"Kairos's older one") };
+        record(&data, &older).unwrap();
+        assert!(install_from(&d, &zip, &"0".repeat(64), None).0.is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"Kairos's older one");
+        assert_eq!(files(&res), ["wakatime-cli-linux-amd64"]);
+        assert_eq!(placed(&data), Some(older), "still Kairos's, to replace next time");
+    }
+
+    #[test]
+    #[ignore = "downloads the official wakatime-cli for this computer and runs it"]
+    fn the_official_wakatime_cli_replaces_an_older_one_kairos_got() {
+        let d = Dir::new("official");
+        let p = platform().unwrap();
+        let (data, res) = (d.0.join("data"), d.0.join("res"));
+        let dest = res.join(file_name(p));
+        fs::create_dir_all(&res).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        fs::write(&dest, "Kairos's older one").unwrap();
+        record(&data, &Placed { path: dest.clone(), version: "v2.0.0".into(), sha256: sha256_hex(b"Kairos's older one") }).unwrap();
+
+        assert_eq!(install_with(&data, &res, None, p, sum(p), &|| download(p)).unwrap(), Some(dest.clone()));
+        let out = std::process::Command::new(&dest).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), VERSION);
+        assert_eq!(placed(&data).map(|p| p.version), Some(VERSION.to_string()));
+    }
+
     #[test]
     #[ignore = "downloads every official wakatime-cli zip"]
     fn the_pinned_checksums_match_the_official_zips() {
         let dir = std::env::temp_dir().join(format!("kairos-wakatime-cli-real-{}", std::process::id()));
         for (platform, sum) in SUMS {
             let zip = download(platform).unwrap();
-            let bin = place(&zip, sum, &file_name(platform), &dir).unwrap();
-            assert!(fs::metadata(&bin).unwrap().len() > 1 << 20, "{platform}");
+            place(&zip, sum, &file_name(platform), &dir, false).unwrap();
+            assert!(fs::metadata(dir.join(file_name(platform))).unwrap().len() > 1 << 20, "{platform}");
         }
         if let Some(p) = platform() {
             let out = std::process::Command::new(dir.join(file_name(p))).arg("--version").output().unwrap();

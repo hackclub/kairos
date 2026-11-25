@@ -47,6 +47,9 @@ jobs:
       - name: wakatime-cli reads an agent's log
         shell: bash
         run: cargo test --locked -p kairos-agent -- --ignored --exact api::tests::the_real_wakatime_cli_sends_what_it_makes_of_a_claude_log --nocapture
+      - name: the official wakatime-cli replaces an older one Kairos got
+        shell: bash
+        run: cargo test --locked -p kairos-core --features client -- --ignored --exact wakatime_cli::tests::the_official_wakatime_cli_replaces_an_older_one_kairos_got --nocapture
       - name: package
         shell: bash
         run: |

@@ -89,10 +89,8 @@ pub fn offer() -> bool {
 /// Tells the person and adds wakatime-cli once their key is in place.
 pub fn set_up() {
     println!("Hackatime is set up.");
-    if wakatime_cli::find().is_none() {
-        if let Err(e) = wakatime_cli::install() {
-            println!("Could not add wakatime-cli ({e:#}). Hackatime's editor plugin gets it when your editor starts.");
-        }
+    if let Err(e) = wakatime_cli::install(&paths::data_dir()) {
+        println!("Could not add wakatime-cli ({e:#}). Hackatime's editor plugin gets it when your editor starts.");
     }
 }
 
