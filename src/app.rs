@@ -206,10 +206,16 @@ impl App {
         let into = dir.join("app");
         match OS {
             _ if name.ends_with(".tar.gz") => output(Command::new("tar").arg("-xzf").arg(&file).arg("-C").arg(&dir))?,
-            // A package is a zip. Windows' own tar reads zips, the one Git brings doesn't.
+            // Installed the way the Store does it, so the app runs with its package's name like on a person's PC.
             _ if name.ends_with(".msix") => {
-                fs::create_dir_all(&into)?;
-                output(Command::new(r"C:\Windows\System32\tar.exe").arg("-xf").arg(&file).arg("-C").arg(&into))?
+                let add = format!("Add-AppxPackage -Path '{}'; (Get-AppxPackage -Name OpenAI.Codex).InstallLocation", file.display());
+                let at = output(Command::new("powershell").args(["-NoProfile", "-Command", &add]))?;
+                fs::remove_file(&file)?;
+                let exe = PathBuf::from(at.trim()).join("app").join("ChatGPT.exe");
+                if !exe.is_file() {
+                    bail!("installed the Codex app but there is no {}", exe.display());
+                }
+                return Ok((exe, version));
             }
             "linux" => output(Command::new("dpkg-deb").arg("-x").arg(&file).arg(&dir))?,
             // ditto keeps the links inside the app's frameworks.
@@ -272,16 +278,17 @@ fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
         let ax = page.ax()?;
         let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
         fs::write(run.join(format!("ax{step}.txt")), lines.join("\n"))?;
+        let has = |roles: &[&str], name: &str| ax.iter().any(|(r, n, _)| roles.contains(&r.as_str()) && n == name);
         let mut did = Vec::new();
-        for (roles, name) in [(&["radio", "checkbox", "button", "option"][..], "Engineering")] {
-            if page.ax_click(roles, name)? {
-                did.push(name);
-                sleep(Duration::from_secs(1));
-            }
+        // Its setup asks what kind of work, then thinks, and lets you skip to the app.
+        if has(&["radio"], "Engineering") && has(&["button"], "Continue") && page.ax_click(&["radio"], "Engineering")? {
+            did.push("Engineering");
+            sleep(Duration::from_secs(1));
         }
-        let next = ["Continue", "Skip", "Next", "Get started", "Not now", "Done", "Maybe later", "Start building", "Open folder"];
-        if let Some(name) = next.into_iter().find(|n| ax.iter().any(|(r, m, _)| r == "button" && m == n)) {
-            page.ax_click(&["button"], name)?;
+        let ways = ["Go to ChatGPT", "Skip", "Continue", "Codex"];
+        let roles = ["button", "link", "tab", "menuitem", "radio"];
+        if let Some(name) = ways.into_iter().find(|n| has(&roles, n) && !(*n == "Codex" && log.contains("Codex"))) {
+            page.ax_click(&roles, name)?;
             did.push(name);
         }
         log += &format!("step {step}: clicked {did:?}\n");
