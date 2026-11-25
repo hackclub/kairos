@@ -96,7 +96,8 @@ jobs:
           retention-days: 7
   tell:
     needs: run
-    if: failure() && github.event_name == 'schedule'
+    # Not on a push to lab, where a red run is someone working on the lab.
+    if: failure() && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
