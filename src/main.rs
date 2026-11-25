@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use harness::{Harness, Rule};
 use model::Model;
 use scenario::Scenario;
-use term::{Term, ENTER};
+use term::{Term, ENTER, ESC};
 
 const USAGE: &str = "usage: lab run <harness> [version|latest|N.x] --kairosd PATH [--work DIR] [--save DIR] [--real-home] [--window]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
@@ -142,8 +142,21 @@ struct Stage<'a> {
     reopen: &'a mut dyn FnMut() -> Result<Term>,
 }
 
-fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage: Stage) -> Result<()> {
+fn now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// When the person did what the events have to show.
+struct Done {
+    /// When Esc was pressed, for each turn that was interrupted.
+    esc: Vec<Option<f64>>,
+    /// From closing the harness to its prompt being back, when no agent runs in the terminal.
+    closed: Vec<(f64, f64)>,
+}
+
+fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage: Stage) -> Result<Done> {
     let mut hands = Hands::new();
+    let mut done = Done { esc: vec![None; scenario.turns.len()], closed: Vec::new() };
     ready(h, term, &mut hands)?;
     for (i, turn) in scenario.turns.iter().enumerate() {
         if turn.restart {
@@ -153,9 +166,14 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             sleep(Duration::from_secs(4));
         }
         if turn.reopen {
-            // Ctrl+C twice, the way out every one of them takes.
+            let closing = now();
+            // Ctrl+C twice, the way out every one of them takes. A terminal whose program has gone refuses the second
+            // on Mac and Windows.
             for _ in 0..2 {
-                term.send("\x03")?;
+                if term.exited() {
+                    break;
+                }
+                let _ = term.send("\x03");
                 sleep(Duration::from_millis(400));
             }
             let until = Instant::now() + Duration::from_secs(8);
@@ -166,13 +184,19 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             *term = (stage.reopen)()?;
             hands = Hands::new();
             ready(h, term, &mut hands)?;
+            done.closed.push((closing, now()));
         }
         model.arm(i);
         term.type_text(turn.prompt)?;
+        if !turn.paste.is_empty() {
+            sleep(Duration::from_millis(400));
+            term.paste(turn.paste)?;
+            sleep(Duration::from_secs(1));
+        }
         sleep(Duration::from_millis(400));
         term.send(ENTER)?;
         let until = Instant::now() + Duration::from_secs(90);
-        while !model.said(i) {
+        while !(model.said(i) || (turn.interrupt && model.stalled(i))) {
             if term.exited() {
                 bail!("{} quit during turn {}", h.id, i + 1);
             }
@@ -182,9 +206,29 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario, stage
             hands.look(term, h.during)?;
             sleep(Duration::from_millis(200));
         }
+        if turn.interrupt {
+            // Watching it work for a bit, then giving up on it.
+            sleep(Duration::from_secs(3));
+            done.esc[i] = Some(now());
+            term.send(ESC)?;
+            // OpenCode wants a second press. Claude Code takes one, and a second would open its rewind list.
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until {
+                sleep(Duration::from_millis(300));
+                if term.screen().contains("again to interrupt") {
+                    term.send(ESC)?;
+                    break;
+                }
+            }
+            // Back at the prompt once the screen holds still.
+            let until = Instant::now() + Duration::from_secs(20);
+            while hands.look(term, &[])?.1 < Duration::from_secs(2) && Instant::now() < until {
+                sleep(Duration::from_millis(200));
+            }
+        }
         sleep(Duration::from_secs(4));
     }
-    Ok(())
+    Ok(done)
 }
 
 fn events(kd: &Path) -> Result<Vec<Value>> {
@@ -214,7 +258,9 @@ fn differ(problems: &mut Vec<String>, turn: usize, what: &str, got: &Value, want
 /// Compares what Kairos recorded with what the script did, and the script with what is on disk.
 /// A person watching the terminal the whole session: from the first prompt to the last reply the window in front is an
 /// agent in a terminal, in the project.
-fn front(all: &[Value], harness: &str) -> Vec<String> {
+/// While the harness is closed the terminal really is a plain terminal, and kairosd looks at the window every few seconds.
+fn front(all: &[Value], harness: &str, closed: &[(f64, f64)]) -> Vec<String> {
+    const LOOKS: f64 = 5.0;
     let of = |kind: &str| -> Vec<f64> { all.iter().filter(|e| e["harness"] == harness && e["kind"] == kind).filter_map(|e| e["ts"].as_f64()).collect() };
     let (Some(&from), Some(&to)) = (of("prompt").first(), of("reply_done").last()) else {
         return Vec::new();
@@ -222,12 +268,20 @@ fn front(all: &[Value], harness: &str) -> Vec<String> {
     let want = (json!("agent_terminal"), json!("proj"));
     let mut problems = Vec::new();
     let mut before = None;
-    for e in all.iter().filter(|e| e["kind"] == "focus") {
-        let (ts, seen) = (e["ts"].as_f64().unwrap_or(0.0), (e["class"].clone(), e["project"].clone()));
-        if ts <= from {
-            before = Some(seen);
-        } else if ts <= to && seen != want {
+    let focus: Vec<(f64, (Value, Value))> =
+        all.iter().filter(|e| e["kind"] == "focus").map(|e| (e["ts"].as_f64().unwrap_or(0.0), (e["class"].clone(), e["project"].clone()))).collect();
+    for (ts, seen) in &focus {
+        let away = closed.iter().any(|&(a, b)| (a..=b + LOOKS).contains(ts));
+        if *ts <= from {
+            before = Some(seen.clone());
+        } else if *ts <= to && *seen != want && !away {
             problems.push(format!("{:.1} s after the first prompt the window in front became {} in project {}", ts - from, seen.0, seen.1));
+        }
+    }
+    for &(_, back) in closed {
+        match focus.iter().rev().find(|(ts, _)| *ts <= back + LOOKS) {
+            Some((_, seen)) if *seen == want => {}
+            seen => problems.push(format!("{LOOKS} s after the harness was opened again the window in front was {seen:?}, not agent_terminal in proj")),
         }
     }
     match before {
@@ -238,7 +292,7 @@ fn front(all: &[Value], harness: &str) -> Vec<String> {
     problems
 }
 
-fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project: &Path) -> Result<Vec<String>> {
+fn check(h: &Harness, version: &str, scenario: &Scenario, esc: &[Option<f64>], all: &[Value], project: &Path) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
     let files = scenario.files();
@@ -277,7 +331,11 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project
         let of = |kind: &str| got.iter().filter(|e| e["kind"] == kind).copied().collect::<Vec<_>>();
         let prompt = got[0];
         differ(&mut problems, n, "prompt.words", &prompt["words"], json!(want.prompt_words));
-        differ(&mut problems, n, "prompt.pasted", &prompt["pasted"], json!(false));
+        differ(&mut problems, n, "prompt.pasted", &prompt["pasted"], json!(want.pasted));
+        // Claude Code keeps what was pasted apart in its prompt history.
+        if h.marks(version) && want.paste_words > 0 {
+            differ(&mut problems, n, "prompt.shape.marked", &prompt["shape"]["marked"], json!({ "pastes": 1, "words": want.paste_words }));
+        }
         differ(&mut problems, n, "prompt.version", &prompt["version"], json!(version));
         differ(&mut problems, n, "the project", &prompt["project"], json!("proj"));
         differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
@@ -291,12 +349,28 @@ fn check(h: &Harness, version: &str, scenario: &Scenario, all: &[Value], project
                 sha => problems.push(format!("turn {n}: agent_commit sha {sha:?} is not a commit in the project")),
             }
         }
+        let asks = of("answered");
+        differ(&mut problems, n, "answered count", &json!(asks.len()), json!(if h.marks(version) { want.asks } else { 0 }));
+        for a in asks {
+            differ(&mut problems, n, "answered.why", &a["why"], json!("permission"));
+            let (asked, at) = (a["asked"].as_f64().unwrap_or(0.0), a["ts"].as_f64().unwrap_or(0.0));
+            // The lab answers a second after the prompt comes up.
+            if !(0.5..20.0).contains(&(at - asked)) {
+                problems.push(format!("turn {n}: the answer came {:.1} s after the ask, the lab answered within a few seconds", at - asked));
+            }
+        }
         let done = of("reply_done");
         differ(&mut problems, n, "reply_done count", &json!(done.len()), json!(1));
         if let Some(d) = done.first() {
             differ(&mut problems, n, "reply_done.reply_words", &d["reply_words"], json!(want.reply_words));
             differ(&mut problems, n, "reply_done.tools", &d["tools"], json!(want.tools));
             differ(&mut problems, n, "reply_done.files_changed", &d["files_changed"], json!(want.files));
+            if let Some(pressed) = esc.get(i).copied().flatten() {
+                let off = d["ts"].as_f64().unwrap_or(0.0) - pressed;
+                if !(-1.5..3.0).contains(&off) {
+                    problems.push(format!("turn {n}: the interrupted reply ended {off:.1} s from when Esc was pressed"));
+                }
+            }
             if got.last().map(|e| &e["kind"]) != Some(&json!("reply_done")) {
                 problems.push(format!("turn {n}: something came after reply_done"));
             }
@@ -436,14 +510,14 @@ fn run() -> Result<bool> {
             fs::copy(&from, &to)?;
         }
     }
-    drove?;
+    let done = drove?;
 
     let all = events(&kd)?;
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
-    problems.extend(check(h, &version, &scenario, &all, &project)?);
+    problems.extend(check(h, &version, &scenario, &done.esc, &all, &project)?);
     if args.window {
-        problems.extend(front(&all, h.id));
+        problems.extend(front(&all, h.id, &done.closed));
     }
     for e in &mine {
         println!("{e}");

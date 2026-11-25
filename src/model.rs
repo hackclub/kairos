@@ -17,6 +17,8 @@ struct State {
     project: PathBuf,
     turn: Option<usize>,
     said: Vec<bool>,
+    /// The turn's last request is being held open, for the person to press Esc.
+    stalled: Vec<bool>,
     requests: Vec<Value>,
     problems: Vec<String>,
 }
@@ -31,14 +33,16 @@ enum Plan {
     Side,
     Act(String, Act),
     Say(String),
+    /// No answer comes until the person gives up on it.
+    Stall,
 }
 
 impl Model {
     pub fn start(scenario: Arc<Scenario>, project: PathBuf) -> Result<Model> {
         let server = Server::http("127.0.0.1:0").map_err(|e| anyhow!("{e}"))?;
         let port = server.server_addr().to_ip().ok_or_else(|| anyhow!("the model server has no port"))?.port();
-        let said = vec![false; scenario.turns.len()];
-        let state = Arc::new(Mutex::new(State { scenario, project, turn: None, said, requests: Vec::new(), problems: Vec::new() }));
+        let (said, stalled) = (vec![false; scenario.turns.len()], vec![false; scenario.turns.len()]);
+        let state = Arc::new(Mutex::new(State { scenario, project, turn: None, said, stalled, requests: Vec::new(), problems: Vec::new() }));
         let shared = state.clone();
         thread::spawn(move || {
             for req in server.incoming_requests() {
@@ -55,6 +59,10 @@ impl Model {
 
     pub fn said(&self, turn: usize) -> bool {
         self.state.lock().unwrap().said[turn]
+    }
+
+    pub fn stalled(&self, turn: usize) -> bool {
+        self.state.lock().unwrap().stalled[turn]
     }
 
     pub fn problems(&self) -> Vec<String> {
@@ -78,6 +86,10 @@ fn plan(state: &Mutex<State>, main: bool, answered: &[String]) -> Plan {
     let scenario = s.scenario.clone();
     match scenario.turns[turn].acts.get(step) {
         Some(act) => Plan::Act(format!("lab_{turn}_{step}"), *act),
+        None if scenario.turns[turn].interrupt => {
+            s.stalled[turn] = true;
+            Plan::Stall
+        }
         None => {
             s.said[turn] = true;
             Plan::Say(scenario.turns[turn].say.to_string())
@@ -110,12 +122,13 @@ fn anthropic(state: &Mutex<State>, body: &Value) -> (&'static str, String, Strin
     let file = |p: &str| project.join(p).to_string_lossy().into_owned();
     let (note, block) = match plan(state, main, &answered) {
         Plan::Side => ("side".to_string(), json!({ "type": "text", "text": "ok" })),
+        Plan::Stall => ("stall".to_string(), json!({ "type": "text", "text": "ok" })),
         Plan::Say(text) => ("say".to_string(), json!({ "type": "text", "text": text })),
         Plan::Act(id, act) => {
             let (name, input) = match act {
                 Act::Write { path, content } => ("Write", json!({ "file_path": file(path), "content": content })),
                 Act::Edit { path, old, new } => ("Edit", json!({ "file_path": file(path), "old_string": old, "new_string": new })),
-                Act::Shell { cmd } => ("Bash", json!({ "command": cmd, "description": "Run the scripted command" })),
+                Act::Shell { cmd } | Act::Asked { cmd } => ("Bash", json!({ "command": cmd, "description": "Run the scripted command" })),
             };
             (id.clone(), json!({ "type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input }))
         }
@@ -199,6 +212,7 @@ fn responses(state: &Mutex<State>, body: &Value) -> (&'static str, String, Strin
     let message = |text: &str| json!({ "type": "message", "role": "assistant", "id": "msg_lab", "content": [{ "type": "output_text", "text": text }] });
     let (note, item) = match plan(state, main, &answered) {
         Plan::Side => ("side".to_string(), message("ok")),
+        Plan::Stall => ("stall".to_string(), message("ok")),
         Plan::Say(text) => ("say".to_string(), message(&text)),
         Plan::Act(id, act) => {
             let call_id = format!("call_{id}");
@@ -211,7 +225,7 @@ fn responses(state: &Mutex<State>, body: &Value) -> (&'static str, String, Strin
                     let patch = format!("*** Begin Patch\n*** Update File: {path}\n@@\n{}{}*** End Patch\n", patch_lines('-', old), patch_lines('+', new));
                     patch_item(&tools, &call_id, &patch, &project)
                 }
-                Act::Shell { cmd } => shell_item(&tools, &call_id, cmd, &project),
+                Act::Shell { cmd } | Act::Asked { cmd } => shell_item(&tools, &call_id, cmd, &project),
             };
             match item {
                 Some(item) => (id, item),
@@ -242,7 +256,7 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
     let (tool, mut args, path) = match act {
         Act::Write { path, content } => (find(&["write"])?, json!({ "content": content }), Some(path)),
         Act::Edit { path, old, new } => (find(&["edit"])?, json!({ "oldString": old, "newString": new }), Some(path)),
-        Act::Shell { cmd } => (find(&["shell", "bash"])?, json!({ "command": cmd }), None),
+        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash"])?, json!({ "command": cmd }), None),
     };
     if let Some(path) = path {
         args[key(tool, &["path", "filePath"])?] = json!(project.join(path).to_string_lossy());
@@ -266,6 +280,7 @@ fn chat(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
     let text = |t: &str| (json!({ "role": "assistant", "content": t }), "stop");
     let (note, (delta, finish)) = match plan(state, !tools.is_empty(), &answered) {
         Plan::Side => ("side".to_string(), text("ok")),
+        Plan::Stall => ("stall".to_string(), text("ok")),
         Plan::Say(t) => ("say".to_string(), text(&t)),
         Plan::Act(id, act) => match chat_call(&tools, act, &project) {
             Some((name, args)) => {
@@ -317,6 +332,10 @@ fn handle(state: &Mutex<State>, mut req: Request) {
     state.lock().unwrap().requests.push(record);
     if note.starts_with("lab_") || note == "say" {
         thread::sleep(Duration::from_millis(1000));
+    }
+    if note == "stall" {
+        // Longer than the lab waits for Esc, and the harness drops the request when it is pressed.
+        thread::sleep(Duration::from_secs(120));
     }
     let header = Header::from_bytes("Content-Type", ctype).expect("a plain header");
     let _ = req.respond(Response::from_string(out).with_header(header));

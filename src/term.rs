@@ -11,6 +11,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
 pub const ENTER: &str = "\r";
 pub const DOWN: &str = "\x1b[B";
+pub const ESC: &str = "\x1b";
 const ROWS: NonZeroU16 = NonZeroU16::new(40).unwrap();
 const COLS: NonZeroU16 = NonZeroU16::new(120).unwrap();
 
@@ -114,6 +115,13 @@ impl Term {
             thread::sleep(Duration::from_millis(25));
         }
         Ok(())
+    }
+
+    /// What a terminal sends for a paste: wrapped in markers when the program asked for them, with lines ended by Enter.
+    pub fn paste(&mut self, text: &str) -> Result<()> {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
+        let marked = self.parser.lock().unwrap().screen().bracketed_paste();
+        self.send(&if marked { format!("\x1b[200~{text}\x1b[201~") } else { text })
     }
 
     pub fn exited(&mut self) -> bool {

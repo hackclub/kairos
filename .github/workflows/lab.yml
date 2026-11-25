@@ -14,7 +14,7 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: "45522602137"
+  CANDIDATE: "45528574372"
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:

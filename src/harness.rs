@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::term::{DOWN, ENTER};
+use crate::term::{DOWN, ENTER, ESC};
 
 /// When every text is on screen, press the keys.
 pub type Rule = (&'static [&'static str], &'static [&'static str]);
@@ -39,6 +39,9 @@ pub struct Harness {
     /// Any of these on a still screen means the prompt box is up.
     pub ready: &'static [&'static str],
     pub during: &'static [Rule],
+    /// The first version that writes down the permission prompts it showed and the pastes it put a placeholder for.
+    /// Only Claude Code asks before a command outside its allow list, the others run with approvals off.
+    pub marks_since: Option<&'static str>,
     pub prepare: fn(home: &Path, project: &Path, model_url: &str, version: &str) -> Result<Launch>,
 }
 
@@ -63,7 +66,13 @@ pub const ALL: &[Harness] = &[
             (&["No, maybe later with /terminal-setup"], &[DOWN]),
         ],
         ready: &["shift+tab to cycle", "? for shortcuts"],
-        during: &[(&["Do you want to proceed?", "❯ No"], &[DOWN]), (&["Do you want to proceed?", "❯ Yes"], &[ENTER])],
+        during: &[
+            (&["Do you want to proceed?", "❯ No"], &[DOWN]),
+            (&["Do you want to proceed?", "❯ Yes"], &[ENTER]),
+            (&["Do you want to proceed?", "❯ 1. Yes"], &[ENTER]),
+        ],
+        // 2.0 keeps no record of a permission prompt, and puts a 20 line paste in the prompt as it is.
+        marks_since: Some("2.1.0"),
         prepare: claude,
     },
     Harness {
@@ -72,9 +81,11 @@ pub const ALL: &[Harness] = &[
         bin: "codex",
         stores: &[".codex/sessions"],
         state: &[".codex"],
-        first_run: &[(&["Trust and continue"], &[ENTER])],
+        // It looks for a newer version in the background and offers it the next time it opens.
+        first_run: &[(&["Trust and continue"], &[ENTER]), (&["Update available", "esc skip"], &[ESC])],
         ready: &["? for shortcuts"],
         during: &[],
+        marks_since: None,
         prepare: codex,
     },
     Harness {
@@ -87,6 +98,7 @@ pub const ALL: &[Harness] = &[
         first_run: &[(&["What's new in"], &[ENTER])],
         ready: &["ctrl+p commands"],
         during: &[],
+        marks_since: None,
         prepare: opencode,
     },
 ];
@@ -163,6 +175,11 @@ fn npm() -> Command {
 }
 
 impl Harness {
+    pub fn marks(&self, version: &str) -> bool {
+        let n = |v: &str| v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+        self.marks_since.is_some_and(|since| n(version) >= n(since))
+    }
+
     /// `latest` is what the harness hands out as its newest, `2.x` the highest 2 it has released.
     fn newest(&self, want: &str) -> Result<String> {
         let major = want.strip_suffix(".x");
