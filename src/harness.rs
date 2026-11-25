@@ -31,6 +31,8 @@ pub struct Harness {
     pub bin: &'static str,
     /// What it writes that Kairos reads, under the home folder.
     pub stores: &'static [&'static str],
+    /// Everything it keeps under the home folder, settings and caches too.
+    pub state: &'static [&'static str],
     pub first_run: &'static [Rule],
     /// Any of these on a still screen means the prompt box is up.
     pub ready: &'static [&'static str],
@@ -43,16 +45,17 @@ pub const ALL: &[Harness] = &[
         id: "claude-code",
         source: Source::Npm("@anthropic-ai/claude-code"),
         bin: "claude",
-        stores: &[".claude/projects"],
+        stores: &[".claude/projects", ".claude/history.jsonl"],
+        state: &[".claude", ".claude.json"],
         first_run: &[
             (&["Choose the text style"], &[ENTER]),
             (&["Press Enter to continue"], &[ENTER]),
-            (&["❯ No, exit", "Yes, I trust this folder"], &[DOWN, ENTER]),
+            (&["❯ No, exit", "Yes, I trust this folder"], &[DOWN]),
             (&["❯ Yes, I trust this folder"], &[ENTER]),
             (&["Do you trust the files in this folder?", "❯ 1. Yes, proceed"], &[ENTER]),
         ],
         ready: &["shift+tab to cycle", "? for shortcuts"],
-        during: &[(&["Do you want to proceed?", "❯ No"], &[DOWN, ENTER]), (&["Do you want to proceed?", "❯ Yes"], &[ENTER])],
+        during: &[(&["Do you want to proceed?", "❯ No"], &[DOWN]), (&["Do you want to proceed?", "❯ Yes"], &[ENTER])],
         prepare: claude,
     },
     Harness {
@@ -60,6 +63,7 @@ pub const ALL: &[Harness] = &[
         source: Source::Npm("@openai/codex"),
         bin: "codex",
         stores: &[".codex/sessions"],
+        state: &[".codex"],
         first_run: &[(&["Trust and continue"], &[ENTER])],
         ready: &["? for shortcuts"],
         during: &[],
@@ -70,7 +74,9 @@ pub const ALL: &[Harness] = &[
         source: Source::Github("sst/opencode"),
         bin: "opencode",
         stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".local/share/opencode/opencode.db-shm"],
-        first_run: &[],
+        state: &[".config/opencode", ".local/share/opencode", ".local/state/opencode", ".cache/opencode"],
+        // After an update it opens with its release notes.
+        first_run: &[(&["What's new in"], &[ENTER])],
         ready: &["ctrl+p commands"],
         during: &[],
         prepare: opencode,

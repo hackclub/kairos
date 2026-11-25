@@ -1,8 +1,8 @@
 {
   "harness": "claude-code",
-  "home": "/data/home/lab-spike/lab/work/claude-code-2.0.77-1795563624/home",
+  "home": "/data/home/lab-spike/lab/work/claude-code-2.0.77-1795564445/home",
   "os": "linux",
-  "project": "/data/home/lab-spike/lab/work/claude-code-2.0.77-1795563624/proj",
+  "project": "/data/home/lab-spike/lab/work/claude-code-2.0.77-1795564445/proj",
   "scenario": "basic",
   "version": "2.0.77"
 }

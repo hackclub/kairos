@@ -2,8 +2,14 @@ name: lab
 on:
   push:
     branches: [lab]
+  # Main starts this every night, since schedules only run from the default branch.
+  workflow_call:
+    secrets:
+      LAB_SLACK_WEBHOOK:
+        required: false
 env:
-  KAIROS: 0.1.17
+  # Empty means the version kairos.hackclub.com serves, the one people run.
+  KAIROS: ""
 jobs:
   run:
     strategy:
@@ -14,37 +20,66 @@ jobs:
           - { os: windows-latest, target: windows-x86_64, exe: ".exe", home: "--real-home" }
           - { os: macos-latest, target: macos-aarch64, exe: "", home: "" }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: lab
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - name: the released kairosd
         shell: bash
         run: |
+          if [ -z "$KAIROS" ]; then
+            KAIROS=$(curl -fsSL https://kairos.hackclub.com/download/latest/manifest.json | tr -d '\r\n' | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          fi
+          echo "kairosd $KAIROS"
           curl -fsSL -o dist.tgz "https://github.com/hackclub/kairos/releases/download/v$KAIROS/kairos-dist-$KAIROS.tar.gz"
           mkdir dist
           tar -xzf dist.tgz -C dist
-      - name: every supported version
+      - name: every supported version and the newest
         shell: bash
         run: |
           failed=0
+          tr -d '\r' < versions.txt > runs.txt
+          cut -d ' ' -f 1 runs.txt | sort -u | sed '/^$/d; s/$/ latest/' >> runs.txt
           while read -r harness version; do
-            version=${version%$'\r'}
             [ -z "$harness" ] && continue
             ./target/release/lab${{ matrix.exe }} run "$harness" "$version" --kairosd "dist/${{ matrix.target }}/kairosd${{ matrix.exe }}" ${{ matrix.home }} > out.txt 2>&1 || failed=1
-            grep -E "^(PASS|FAIL|lab:|  )" out.txt || tail -20 out.txt
+            if grep -E "^(PASS|FAIL|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
+            cat part.txt >> result.txt
             rm -rf work/tools
-          done < versions.txt
+          done < runs.txt
           exit $failed
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.target }}
+          path: result.txt
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lab-${{ matrix.target }}
           path: |
             work
-            !work/*/home/.cache
-            !work/*/home/.npm
+            !work/*/home
           include-hidden-files: true
           retention-days: 7
+  tell:
+    needs: run
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+      - name: post to Slack
+        env:
+          HOOK: ${{ secrets.LAB_SLACK_WEBHOOK }}
+        run: |
+          [ -n "$HOOK" ] || { echo "no LAB_SLACK_WEBHOOK secret"; exit 1; }
+          wrong=$(for f in results/*/result.txt; do t=${f#results/result-}; grep -E -A 4 "^(FAIL|lab: .* (quit|never))" "$f" | grep -v "^lab: .*run folder" | cut -c 1-300 | sed "s|^|${t%/result.txt}  |"; done | head -40)
+          jq -n --arg t "Harness lab is red: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"$'\n```\n'"$wrong"$'\n```' '{text: $t}' | curl -fsS -X POST -H 'Content-type: application/json' --data @- "$HOOK"

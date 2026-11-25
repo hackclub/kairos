@@ -77,25 +77,38 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn press(term: &mut Term, rules: &[Rule]) -> Result<bool> {
-    let screen = term.screen();
-    for (texts, keys) in rules {
-        if texts.iter().all(|t| screen.contains(t)) {
-            for k in *keys {
-                term.send(k)?;
-                sleep(Duration::from_millis(300));
-            }
-            sleep(Duration::from_millis(1500));
-            return Ok(true);
-        }
+/// Presses keys the way a person does: only at a screen that has held still for a second, then looks again.
+struct Hands {
+    last: String,
+    since: Instant,
+}
+
+impl Hands {
+    fn new() -> Hands {
+        Hands { last: String::new(), since: Instant::now() }
     }
-    Ok(false)
+
+    /// The screen and how long it has looked like this, after pressing the keys of the first rule that fits it.
+    fn look(&mut self, term: &mut Term, rules: &[Rule]) -> Result<(String, Duration)> {
+        let screen = term.screen();
+        if screen != self.last {
+            (self.last, self.since) = (screen.clone(), Instant::now());
+        } else if self.since.elapsed() > Duration::from_secs(1) {
+            if let Some((_, keys)) = rules.iter().find(|(texts, _)| texts.iter().all(|t| screen.contains(t))) {
+                for k in *keys {
+                    term.send(k)?;
+                }
+                self.since = Instant::now();
+            }
+        }
+        Ok((screen, self.since.elapsed()))
+    }
 }
 
 fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario) -> Result<()> {
     // Codex shows its prompt for a moment before the trust question, so the prompt has to be up and holding still.
     let until = Instant::now() + Duration::from_secs(90);
-    let (mut last, mut still) = (String::new(), Instant::now());
+    let mut hands = Hands::new();
     loop {
         if term.exited() {
             bail!("{} quit before its prompt came up. Screen:\n{}", h.id, term.screen());
@@ -103,11 +116,8 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario) -> Re
         if Instant::now() > until {
             bail!("{} never showed its prompt ({:?}). Screen:\n{}", h.id, h.ready, term.screen());
         }
-        let pressed = press(term, h.first_run)?;
-        let screen = term.screen();
-        if pressed || screen != last {
-            (last, still) = (screen, Instant::now());
-        } else if h.ready.iter().any(|r| screen.contains(r)) && still.elapsed() > Duration::from_secs(2) {
+        let (screen, still) = hands.look(term, h.first_run)?;
+        if h.ready.iter().any(|r| screen.contains(r)) && still > Duration::from_secs(2) {
             break;
         }
         sleep(Duration::from_millis(200));
@@ -125,9 +135,8 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, scenario: &Scenario) -> Re
             if Instant::now() > until {
                 bail!("turn {} never finished. Screen:\n{}", i + 1, term.screen());
             }
-            if !press(term, h.during)? {
-                sleep(Duration::from_millis(300));
-            }
+            hands.look(term, h.during)?;
+            sleep(Duration::from_millis(200));
         }
         sleep(Duration::from_secs(4));
     }
@@ -253,8 +262,9 @@ fn run() -> Result<bool> {
             bail!("--real-home rewrites harness settings and sessions in this account's home, so it only runs in CI");
         }
         let home = PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).context("no home folder")?);
-        for store in h.stores {
-            let old = home.join(store);
+        // Every run starts as a first install, with nothing an earlier version left behind.
+        for kept in h.state {
+            let old = home.join(kept);
             if old.is_dir() {
                 fs::remove_dir_all(&old)?;
             } else if old.is_file() {
@@ -329,6 +339,16 @@ fn run() -> Result<bool> {
     let _ = daemon.wait();
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
     fs::write(run.join("requests.jsonl"), requests)?;
+    // What Kairos read, kept next to the run so a wrong event can be traced to the line it came from.
+    for store in h.stores {
+        let (from, to) = (home.join(store), run.join("store").join(store));
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else if from.is_file() {
+            fs::create_dir_all(to.parent().context("a store path with no folder")?)?;
+            fs::copy(&from, &to)?;
+        }
+    }
     drove?;
 
     let all = events(&kd)?;
@@ -351,21 +371,12 @@ fn run() -> Result<bool> {
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
-        for store in h.stores {
-            let (from, to) = (home.join(store), dir.join("store").join(store));
-            if from.is_dir() {
-                copy_dir(&from, &to)?;
-            } else if from.is_file() {
-                fs::create_dir_all(to.parent().context("a store path with no folder")?)?;
-                fs::copy(&from, &to)?;
-            }
-        }
+        fs::create_dir_all(&dir)?;
         // OpenCode's database is 14 MB of mostly cache, so the store is kept packed, byte for byte as the harness left it.
-        let packed = Command::new("tar").arg("-czf").arg(dir.join("store.tar.gz")).arg("-C").arg(&dir).arg("store").status()?;
+        let packed = Command::new("tar").arg("-czf").arg(dir.join("store.tar.gz")).arg("-C").arg(&run).arg("store").status()?;
         if !packed.success() {
             bail!("tar could not pack the sample's store");
         }
-        fs::remove_dir_all(dir.join("store"))?;
         let lines: String = mine.iter().map(|e| format!("{e}\n")).collect();
         fs::write(dir.join("events.jsonl"), lines)?;
         let about = json!({ "harness": h.id, "version": version, "scenario": scenario.name, "os": std::env::consts::OS, "home": home, "project": project });
