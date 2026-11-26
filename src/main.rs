@@ -26,7 +26,7 @@ use scenario::Scenario;
 use term::{Term, ENTER, ESC};
 
 const USAGE: &str =
-    "usage: lab run <harness or app> [version|latest|N.x] --kairosd PATH [--scenario basic|two] [--work DIR] [--save DIR] [--real-home] [--window]";
+    "usage: lab run <harness or app> [version|latest|N.x] --kairosd PATH [--scenario basic|two|tmux|screen] [--work DIR] [--save DIR] [--real-home] [--window]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
 const STRAY_ENV: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -672,15 +672,27 @@ fn run() -> Result<bool> {
     if args.scenario == "two" {
         return two::run(h, &args);
     }
-    if args.scenario != "basic" {
-        bail!("no scenario {:?}, the lab knows basic and two", args.scenario);
+    // Runs the agent in a pane of tmux or screen, whose server runs it away from the window.
+    let mux = ["tmux", "screen"].into_iter().find(|m| args.scenario == *m);
+    if args.scenario != "basic" && mux.is_none() {
+        bail!("no scenario {:?}, the lab knows basic, two, tmux and screen", args.scenario);
+    }
+    if let Some(m) = mux {
+        if cfg!(windows) || Command::new("sh").args(["-c", &format!("command -v {m}")]).output().map_or(true, |o| !o.status.success()) {
+            println!("SKIP {} {m}: no {m} here", h.id);
+            return Ok(true);
+        }
     }
     let root = std::path::absolute(&args.work)?;
     let (bin, version) = h.install(&args.version, &root.join("tools"))?;
     let p = place(&args, h.id, &version, h.state)?;
     let Place { run, home, project, kd } = &p;
 
-    let scenario = Arc::new(scenario::basic());
+    let mut scenario = scenario::basic();
+    if let Some(m) = mux {
+        scenario.name = m;
+    }
+    let scenario = Arc::new(scenario);
     let model = Model::start(scenario.clone(), project.clone())?;
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
@@ -691,7 +703,30 @@ fn run() -> Result<bool> {
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(home, project, &url, &version)?;
-    let open = |args: &[String], raw: &str| -> Result<Term> { Term::spawn(command(&bin, args, project, home, &launch.env), &run.join(raw)) };
+    // The run's own server.
+    let sock = format!("lab-{}", std::process::id());
+    let conf = run.join("mux.conf");
+    match mux {
+        Some("tmux") => fs::write(&conf, "set -g status off\nset -sg escape-time 0\n")?,
+        Some(_) => fs::write(&conf, "startup_message off\nmaptimeout 0\n")?,
+        None => {}
+    }
+    let open = |args: &[String], raw: &str| -> Result<Term> {
+        let Some(m) = mux else {
+            return Term::spawn(command(&bin, args, project, home, &launch.env), &run.join(raw));
+        };
+        let mut all: Vec<String> = if m == "tmux" {
+            vec!["-L".into(), sock.clone(), "-f".into(), conf.to_string_lossy().into(), "new-session".into(), "--".into()]
+        } else {
+            vec!["-S".into(), sock.clone(), "-c".into(), conf.to_string_lossy().into()]
+        };
+        all.push(bin.to_string_lossy().into());
+        all.extend(args.iter().cloned());
+        let mut cmd = command(Path::new(m), &all, project, home, &launch.env);
+        cmd.env_remove("TMUX");
+        cmd.env_remove("STY");
+        Term::spawn(cmd, &run.join(raw))
+    };
     let mut term = open(&launch.args, "pty.raw")?;
     if args.window {
         wait_focus(kd, "proj", 0.0)?;
@@ -716,6 +751,10 @@ fn run() -> Result<bool> {
     person.busy(false);
     fs::write(run.join("screen.txt"), term.screen())?;
     term.kill();
+    if let Some(m) = mux {
+        let stop: &[&str] = if m == "tmux" { &["-L", &sock, "kill-server"] } else { &["-S", &sock, "-X", "quit"] };
+        let _ = Command::new(m).args(stop).status();
+    }
     if !launch.after.is_empty() {
         let mut stop = Command::new(&bin);
         stop.args(&launch.after).current_dir(project).env("HOME", home).env("USERPROFILE", home).stdin(Stdio::null());
