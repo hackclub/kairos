@@ -218,6 +218,9 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     sleep(Duration::from_secs(2));
     let launch = (h.prepare)(&p.home, &p.project, &url, &version)?;
     let launch_b = (h.prepare)(&p.home, &second, &url, &version)?;
+    // Until the agent starts, the person's own window sits outside any project, like the second one: the lab's folder
+    // is a project of its own.
+    std::env::set_current_dir(&away)?;
     let main = pane::own(&format!("lab-main-{}", std::process::id()))?;
     let mut pane = Pane::open(&p.run, &away)?;
     anyhow::ensure!(pane.window != main, "the second window opened as a tab of the first, {:?}", main);
