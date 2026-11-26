@@ -433,8 +433,13 @@ fn handle(state: &Mutex<State>, mut req: Request) {
     } else if path.ends_with("/messages") {
         anthropic(state, lane, &body)
     } else if path.ends_with("/responses") {
-        // T3 Code names threads and writes commit messages with `codex exec`, which the lab never runs as the harness.
-        let side = req.headers().iter().any(|h| h.field.equiv("User-Agent") && h.value.as_str().contains("codex_exec"));
+        // T3 Code names threads and writes commit messages with `codex exec`, which the lab never runs as the harness. The
+        // Codex app names a new thread with a turn of its own, with tools, that would otherwise take the script's steps.
+        let side = req.headers().iter().any(|h| {
+            (h.field.equiv("User-Agent") && h.value.as_str().contains("codex_exec"))
+                || (h.field.equiv("x-codex-turn-metadata")
+                    && serde_json::from_str::<Value>(h.value.as_str()).is_ok_and(|m| m["thread_source"].as_str().is_some_and(|s| s != "user")))
+        });
         responses(state, lane, &body, side)
     } else if path.ends_with("/chat/completions") {
         chat(state, lane, &body)

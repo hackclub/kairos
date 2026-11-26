@@ -463,6 +463,35 @@ fn codex_start(page: &mut Page, run: &Path, project: &str) -> Result<()> {
                 log += &format!("picked {project} in the message box: {picked}\n");
                 sleep(Duration::from_secs(2));
             }
+            // On Windows the app ignores config.toml's full access and runs commands in its own sandbox, where .git is
+            // read only, so the script's commits fail.
+            let full = |page: &mut Page| -> Result<bool> { Ok(page.ax()?.iter().any(|(r, n, _)| r == "StaticText" && n == "Full access")) };
+            if !full(&mut *page)? && page.ax_click(&["button"], "Change permissions")? {
+                sleep(Duration::from_secs(1));
+                let ax = page.ax()?;
+                let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
+                fs::write(run.join("ax-perms.txt"), lines.join("\n"))?;
+                let items = ["menuitem", "menuitemradio", "menuitemcheckbox", "option", "radio", "button"];
+                let name = ax.iter().find(|(r, n, _)| items.contains(&r.as_str()) && n.starts_with("Full access")).map(|x| x.1.clone());
+                let picked = match name {
+                    Some(name) => page.ax_click(&items, &name)?,
+                    None => false,
+                };
+                sleep(Duration::from_secs(2));
+                let ax = page.ax()?;
+                let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
+                fs::write(run.join("ax-perms2.txt"), lines.join("\n"))?;
+                if ax.iter().any(|(r, _, _)| r == "dialog" || r == "alertdialog") {
+                    for ok in ["Continue", "Enable", "Turn on", "Confirm", "Allow", "Yes"] {
+                        if page.ax_click(&["button"], ok)? {
+                            log += &format!("confirmed full access with {ok:?}\n");
+                            sleep(Duration::from_secs(2));
+                            break;
+                        }
+                    }
+                }
+                log += &format!("picked full access: {picked}, now full: {}\n", full(&mut *page)?);
+            }
             let ax = page.ax()?;
             let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
             fs::write(run.join("ax-chat.txt"), lines.join("\n"))?;
