@@ -22,6 +22,7 @@ const IGNORED_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "venv
 const QUIET: Duration = Duration::from_secs(2);
 const MAX_WAIT: Duration = Duration::from_secs(30);
 const MAX_DIRS: usize = 8192;
+const JUST_WRITTEN: Duration = Duration::from_secs(10);
 
 pub enum Watch {
     Root(PathBuf, String),
@@ -33,6 +34,12 @@ fn ignored(path: &Path) -> bool {
         || path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
             n.ends_with('~') || n.ends_with(".swp") || n.ends_with(".swx") || n.ends_with(".tmp") || n == "4913" || atomic_write(n)
         })
+}
+
+// Windows reports a change of attributes or permissions (OneDrive, backup tools, the Codex app's sandbox) the same way
+// as a write, so such a change counts only if the file was just written.
+fn just_written(path: &Path) -> bool {
+    std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().map_or(true, |age| age < JUST_WRITTEN))
 }
 
 // Claude Code writes `a.rs.tmp.<pid>.<hex>` and renames it over `a.rs`.
@@ -254,6 +261,41 @@ mod tests {
         let _ = fs::remove_dir_all(&own);
     }
 
+    // FSEvents gives a file created moments ago its created flag again on its next change. An older file's permission
+    // change comes as metadata only there, which never counted.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_permission_change_is_not_a_save() {
+        let root = std::env::temp_dir().join(format!("kairos-watch-perms-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        #[cfg(not(windows))]
+        let root = root.canonicalize().unwrap();
+        let old = root.join("README.md");
+        fs::write(&old, "# demo").unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        fs::File::options().write(true).open(&old).unwrap().set_modified(hour_ago).unwrap();
+        let (wtx, wrx) = mpsc::channel();
+        let (otx, orx) = mpsc::channel();
+        let own = root.with_extension("data");
+        spawn(wrx, wtx.clone(), otx, own.clone(), mpsc::channel().0, Arc::new(Excluded::new(own.clone())));
+        wtx.send(Watch::Root(root.clone(), "o/r".into())).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        let mut perms = fs::metadata(&old).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&old, perms.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        fs::write(root.join("hello.py"), "x").unwrap();
+        let Msg::Event(e) = orx.recv_timeout(Duration::from_secs(8)).unwrap() else {
+            panic!("expected an event");
+        };
+        assert_eq!(e.kind, Kind::FileSave { count: 1, paths: vec!["hello.py".into()] });
+        perms.set_readonly(false);
+        fs::set_permissions(&old, perms).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&own);
+    }
+
     #[test]
     fn an_excluded_root_is_never_watched_and_one_that_becomes_excluded_stops() {
         let base = std::env::temp_dir().join(format!("kairos-watch-excluded-{}", std::process::id()));
@@ -419,6 +461,9 @@ pub fn spawn(
                         }
                         if path.is_dir() {
                             st.add_tree(&path, &ex);
+                            continue;
+                        }
+                        if ev.kind == EventKind::Modify(ModifyKind::Any) && !just_written(&path) {
                             continue;
                         }
                         if let Some(p) = st.project_of(&path).and_then(|(root, _)| nested_repo(&path, root)) {
