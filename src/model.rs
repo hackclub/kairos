@@ -414,7 +414,14 @@ fn handle(state: &Mutex<State>, mut req: Request) {
     // For looking at what a new harness sends: every request whole, one per line.
     if let Some(f) = std::env::var_os("LAB_DUMP") {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
-            let _ = writeln!(f, "{}", json!({ "path": url, "headers": req.headers().iter().map(|h| format!("{}: {}", h.field, h.value)).collect::<Vec<_>>(), "body": raw }));
+            // The runs' artifacts can be downloaded, so no keys, not even the lab's own.
+            let headers: Vec<String> = req
+                .headers()
+                .iter()
+                .filter(|h| !["authorization", "cookie", "x-api-key"].iter().any(|k| h.field.equiv(*k)))
+                .map(|h| format!("{}: {}", h.field, h.value))
+                .collect();
+            let _ = writeln!(f, "{}", json!({ "path": url, "headers": headers, "body": raw }));
         }
     }
     let path = url.split('?').next().unwrap_or_default();

@@ -17,8 +17,9 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: ""
-  SYSTEMS: ""
+  ONLY: "codex-app"
+  SYSTEMS: "macos,windows"
+  LAB_DUMP: ${{ github.workspace }}/work/dump.jsonl
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
