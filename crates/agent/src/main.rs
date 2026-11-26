@@ -84,6 +84,11 @@ fn run(replace: Option<u32>) -> Result<()> {
         diag!("kairosd: already running, exiting");
         return Ok(());
     };
+    // Started from a terminal, kairosd would keep that terminal's folder (often a project) as its own, and Windows
+    // won't delete or rename a folder a running process is in. The updater passes it on, so it lasted until a reboot.
+    if dir.is_absolute() {
+        let _ = std::env::set_current_dir(&dir);
+    }
     update::begin(&dir);
     let status = status::shared();
     if let Some(acct) = account::load(&dir) {
