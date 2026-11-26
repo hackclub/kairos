@@ -63,10 +63,7 @@ fn send(term: &mut Term, model: &Model, i: usize, turn: &Turn, person: &Person) 
 /// A key the person presses in the window in front, which reaches that window's terminal (the agents get theirs through
 /// their own ptys).
 fn window_key(person: &Person) -> Result<()> {
-    if cfg!(unix) {
-        person.enter()?;
-    }
-    Ok(())
+    person.enter()
 }
 
 /// Waits for the turn's answer, pressing what the harness asks for meanwhile.

@@ -17,7 +17,7 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: "claude-code latest two|opencode 2.x two"
+  ONLY: " two$"
   SYSTEMS: "windows"
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
