@@ -69,7 +69,7 @@ impl Person {
     /// Types into the window in front with the system's own key events, one key at a time.
     pub fn type_text(&self, text: &str) -> Result<()> {
         for c in text.chars() {
-            keys(Some(c))?;
+            keys(Key::Char(c))?;
             self.log.lock().unwrap().inputs.push(crate::now());
             thread::sleep(Duration::from_millis(40));
         }
@@ -77,7 +77,13 @@ impl Person {
     }
 
     pub fn enter(&self) -> Result<()> {
-        keys(None)?;
+        keys(Key::Enter)?;
+        self.log.lock().unwrap().inputs.push(crate::now());
+        Ok(())
+    }
+
+    pub fn tab(&self) -> Result<()> {
+        keys(Key::Tab)?;
         self.log.lock().unwrap().inputs.push(crate::now());
         Ok(())
     }
@@ -116,20 +122,27 @@ fn nudge() -> Result<()> {
     Ok(())
 }
 
-/// One character typed, or Enter for `None`.
+#[derive(Clone, Copy)]
+enum Key {
+    Char(char),
+    Enter,
+    Tab,
+}
+
 #[cfg(target_os = "linux")]
-fn keys(c: Option<char>) -> Result<()> {
+fn keys(k: Key) -> Result<()> {
     let mut xdotool = std::process::Command::new("xdotool");
-    match c {
-        Some(c) => xdotool.args(["type", "--delay", "0", "--"]).arg(c.to_string()),
-        None => xdotool.args(["key", "Return"]),
+    match k {
+        Key::Char(c) => xdotool.args(["type", "--delay", "0", "--"]).arg(c.to_string()),
+        Key::Enter => xdotool.args(["key", "Return"]),
+        Key::Tab => xdotool.args(["key", "Tab"]),
     };
     anyhow::ensure!(xdotool.status().map_err(|e| anyhow::anyhow!("xdotool: {e}"))?.success(), "xdotool could not type");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn keys(c: Option<char>) -> Result<()> {
+fn keys(k: Key) -> Result<()> {
     use std::ffi::c_void;
     use std::ptr::null;
 
@@ -144,15 +157,15 @@ fn keys(c: Option<char>) -> Result<()> {
         fn CFRelease(cf: *const c_void);
     }
     const HID_TAP: u32 = 0;
-    const RETURN: u16 = 36;
     let mut units = [0u16; 2];
-    let text: &[u16] = match c {
-        Some(c) => c.encode_utf16(&mut units),
-        None => &[],
+    let (code, text): (u16, &[u16]) = match k {
+        Key::Char(c) => (0, c.encode_utf16(&mut units)),
+        Key::Enter => (36, &[]),
+        Key::Tab => (48, &[]),
     };
     for down in [true, false] {
         unsafe {
-            let e = CGEventCreateKeyboardEvent(null(), if c.is_some() { 0 } else { RETURN }, down);
+            let e = CGEventCreateKeyboardEvent(null(), code, down);
             anyhow::ensure!(!e.is_null(), "CGEventCreateKeyboardEvent failed");
             if !text.is_empty() {
                 CGEventKeyboardSetUnicodeString(e, text.len(), text.as_ptr());
@@ -165,26 +178,27 @@ fn keys(c: Option<char>) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn keys(c: Option<char>) -> Result<()> {
+fn keys(k: Key) -> Result<()> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_RETURN,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_RETURN, VK_TAB,
     };
     let key = |vk: u16, scan: u16, flags: u32| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     };
     let mut events = Vec::new();
-    match c {
-        Some(c) => {
+    match k {
+        Key::Char(c) => {
             let mut units = [0u16; 2];
             for &u in c.encode_utf16(&mut units).iter() {
                 events.push(key(0, u, KEYEVENTF_UNICODE));
                 events.push(key(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
             }
         }
-        None => {
-            events.push(key(VK_RETURN, 0, 0));
-            events.push(key(VK_RETURN, 0, KEYEVENTF_KEYUP));
+        Key::Enter | Key::Tab => {
+            let vk = if matches!(k, Key::Enter) { VK_RETURN } else { VK_TAB };
+            events.push(key(vk, 0, 0));
+            events.push(key(vk, 0, KEYEVENTF_KEYUP));
         }
     }
     let sent = unsafe { SendInput(events.len() as u32, events.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
@@ -193,7 +207,7 @@ fn keys(c: Option<char>) -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn keys(_c: Option<char>) -> Result<()> {
+fn keys(_k: Key) -> Result<()> {
     anyhow::bail!("the lab can't type on this system")
 }
 

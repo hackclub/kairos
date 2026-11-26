@@ -57,6 +57,8 @@ enum Source {
     Antigravity,
     /// OpenAI's feed for the Mac and the Windows package, newest only.
     Codex,
+    /// Anthropic's apt repo, the Mac's feed and the Windows package list.
+    Claude,
 }
 
 enum Drive {
@@ -64,8 +66,8 @@ enum Drive {
     Page,
     /// Over the debugging port, in the agent's panel beside the editor.
     Panel,
-    /// The app opens the project from a link and its message box takes the keys.
-    Keys,
+    /// The app opens the project from the link this makes and its message box takes the keys.
+    Keys(fn(&Path) -> String),
 }
 
 fn t3_asset(v: &str) -> String {
@@ -132,7 +134,7 @@ pub const ALL: &[App] = &[
         state: &[".config/opencode", ".config/ai.opencode.desktop", ".local/share/opencode", ".local/state/opencode"],
         stores: &[".local/share/opencode/opencode.db", ".local/share/opencode/opencode.db-wal", ".config/ai.opencode.desktop/drafts.sqlite", ".config/ai.opencode.desktop/opencode.settings"],
         exe: |name| if OS == "linux" { name == "ai.opencode" } else { name == "OpenCode.exe" },
-        drive: Drive::Keys,
+        drive: Drive::Keys(|p| format!("opencode://open-project?directory={}", p.display())),
         pick: None,
     },
     // OpenAI's Codex app, now called ChatGPT. It runs the codex inside it, on the same ~/.codex.
@@ -144,6 +146,18 @@ pub const ALL: &[App] = &[
         stores: &[".codex/sessions", ".codex/log"],
         exe: |name| name == "ChatGPT.exe",
         drive: Drive::Page,
+        pick: None,
+    },
+    // Claude desktop's Code tab, which runs a Claude Code of its own. With no sign-in it takes the lab model as an
+    // organization's gateway from machine policy.
+    App {
+        id: "claude-desktop",
+        source: Source::Claude,
+        harness: "claude-code",
+        state: &[".claude", ".claude.json", ".config/Claude-3p"],
+        stores: &[".claude/projects"],
+        exe: |name| name == "claude-desktop" || name.eq_ignore_ascii_case("claude.exe"),
+        drive: Drive::Keys(|p| format!("claude://code/new?folder={}", p.display())),
         pick: None,
     },
     // The editor with Google's agent in a side panel, which runs agy from ~/.gemini/bin.
@@ -194,6 +208,7 @@ impl App {
             }
             Source::Antigravity => antigravity_ide(want)?,
             Source::Codex => codex_app(want)?,
+            Source::Claude => claude_desktop(want)?,
         };
         let dir = tools.join(format!("{}-{version}", self.id));
         if let Some(exe) = program(&dir, self.exe) {
@@ -220,6 +235,11 @@ impl App {
                     bail!("installed the Codex app but there is no {}", exe.display());
                 }
                 return Ok((exe, version));
+            }
+            // A zip by another name. Windows' own tar reads zips, Git's doesn't.
+            _ if name.ends_with(".nupkg") => {
+                let tar = PathBuf::from(std::env::var_os("SystemRoot").context("no SystemRoot")?).join("System32").join("tar.exe");
+                output(Command::new(tar).arg("-xf").arg(&file).arg("-C").arg(&dir))?
             }
             "linux" => output(Command::new("dpkg-deb").arg("-x").arg(&file).arg(&dir))?,
             // ditto keeps the links inside the app's frameworks.
@@ -269,6 +289,134 @@ fn codex_app(want: &str) -> Result<(String, String)> {
         bail!("OpenAI only hands out the newest Codex app, {version}, not {want}");
     }
     Ok((version, url))
+}
+
+/// The newest Claude desktop. Linux builds are numbered apart from the Mac's and Windows'.
+fn claude_desktop(want: &str) -> Result<(String, String)> {
+    let get = |url: &str| output(Command::new("curl").args(["-fsSL", "--retry", "3", url]));
+    let (version, url) = match OS {
+        "linux" => {
+            let apt = "https://downloads.claude.ai/claude-desktop/apt/stable";
+            let packages = get(&format!("{apt}/dists/stable/main/binary-amd64/Packages"))?;
+            let mut builds: Vec<(Vec<u64>, String, String)> = packages
+                .split("\n\n")
+                .filter(|p| p.lines().any(|l| l == "Package: claude-desktop"))
+                .filter_map(|p| {
+                    let field = |k: &str| p.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
+                    let v = field("Version:")?;
+                    Some((v.split('.').map(|n| n.parse().unwrap_or(0)).collect(), v.to_string(), format!("{apt}/{}", field("Filename:")?)))
+                })
+                .collect();
+            builds.sort();
+            let (_, version, url) = builds.pop().context("no claude-desktop in Anthropic's apt repo")?;
+            (version, url)
+        }
+        "macos" => {
+            let feed: Value = serde_json::from_str(&get("https://downloads.claude.ai/releases/darwin/universal/RELEASES.json")?).context("the Mac feed")?;
+            let version = feed["currentRelease"].as_str().context("the Mac feed names no release")?;
+            let url = feed["releases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["version"] == version)
+                .and_then(|r| r["updateTo"]["url"].as_str())
+                .context("no download for the Mac's current release")?;
+            (version.to_string(), url.to_string())
+        }
+        _ => {
+            let base = "https://downloads.claude.ai/releases/win32/x64";
+            let list = get(&format!("{base}/RELEASES"))?;
+            let name = list.lines().filter_map(|l| l.split_whitespace().nth(1)).filter(|n| n.ends_with("-full.nupkg")).last().context("no full package in the Windows list")?;
+            let version = name.strip_prefix("AnthropicClaude-").and_then(|n| n.strip_suffix("-full.nupkg")).context("no version in the Windows package's name")?;
+            (version.to_string(), format!("{base}/{name}"))
+        }
+    };
+    if want != "latest" && want != version {
+        bail!("the lab only finds the newest Claude desktop, {version}, not {want}");
+    }
+    Ok((version, url))
+}
+
+const CLAUDE_FILE: &str = "/etc/claude-desktop/managed-settings.json";
+const CLAUDE_PLIST: &str = "/Library/Managed Preferences/com.anthropic.claudefordesktop.plist";
+const CLAUDE_KEY: &str = r"HKLM:\SOFTWARE\Policies\Claude";
+
+/// Claude desktop on the lab model the way an organization sets it up, the only way it runs with no sign-in. Auto mode
+/// stays off: it asks the model about each command, which the lab model doesn't answer.
+fn claude_policy(url: &str, run: &Path) -> Result<()> {
+    let policy = json!({
+        "inferenceProvider": "gateway",
+        "inferenceGatewayBaseUrl": url,
+        "inferenceGatewayApiKey": "lab",
+        "inferenceModels": ["claude-sonnet-5"],
+        "deploymentMode": "3p",
+        "disableAutoUpdates": true,
+        "autoModeEnabled": false,
+    });
+    match OS {
+        "linux" => {
+            let file = run.join("managed-settings.json");
+            fs::write(&file, policy.to_string())?;
+            // Root's file in root's folder, or none of it applies.
+            output(Command::new("sudo").args(["install", "-D", "-m", "644", "-o", "root", "-g", "root"]).arg(&file).arg(CLAUDE_FILE))?;
+        }
+        "macos" => {
+            let (from, plist) = (run.join("policy.json"), run.join("policy.plist"));
+            fs::write(&from, policy.to_string())?;
+            output(Command::new("plutil").args(["-convert", "xml1", "-o"]).arg(&plist).arg(&from))?;
+            output(Command::new("sudo").args(["mkdir", "-p", "/Library/Managed Preferences"]))?;
+            output(Command::new("sudo").args(["install", "-m", "644", "-o", "root", "-g", "wheel"]).arg(&plist).arg(CLAUDE_PLIST))?;
+        }
+        _ => {
+            // It reads text and numbers only: a list as its JSON text, a switch as 0 or 1.
+            let mut ps = format!("New-Item -Path '{CLAUDE_KEY}' -Force | Out-Null; ");
+            for (k, v) in policy.as_object().into_iter().flatten() {
+                let (value, kind) = match v {
+                    Value::Bool(b) => (u8::from(*b).to_string(), "DWord"),
+                    Value::String(s) => (format!("'{s}'"), "String"),
+                    other => (format!("'{other}'"), "String"),
+                };
+                ps += &format!("New-ItemProperty -Path '{CLAUDE_KEY}' -Name {k} -Value {value} -PropertyType {kind} -Force | Out-Null; ");
+            }
+            output(Command::new("powershell").args(["-NoProfile", "-Command", &ps]))?;
+        }
+    }
+    Ok(())
+}
+
+fn claude_policy_off() {
+    let _ = match OS {
+        "linux" => Command::new("sudo").args(["rm", "-f", CLAUDE_FILE]).output(),
+        "macos" => Command::new("sudo").args(["rm", "-f", CLAUDE_PLIST]).output(),
+        _ => Command::new("powershell").args(["-NoProfile", "-Command", &format!("Remove-Item -Path '{CLAUDE_KEY}' -Recurse -Force")]).output(),
+    };
+}
+
+/// Claude desktop's first run: a welcome saying the organization set it up, then the link again (the first one came
+/// before it was ready) and its question whether to trust the folder. Each time the button wanted is the second one.
+fn claude_start(person: &Person, exe: &Path, link: &str, home: &Path, run: &Path) -> Result<()> {
+    person.tab()?;
+    person.enter()?;
+    sleep(Duration::from_secs(5));
+    if OS == "macos" {
+        // A Mac app takes links from the system, not from a second copy of itself.
+        let bundle = exe.ancestors().nth(3).context("the app is in no bundle")?;
+        output(Command::new("open").arg("-a").arg(bundle).arg(link))?;
+    } else {
+        // A second copy hands its link to the first and quits.
+        let log = OpenOptions::new().create(true).append(true).open(run.join("app.log"))?;
+        let mut again = Command::new(exe);
+        again.arg(link).env("HOME", home).env("USERPROFILE", home).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+        if OS == "linux" {
+            again.args(["--no-sandbox", "--disable-gpu"]);
+        }
+        again.spawn()?;
+    }
+    sleep(Duration::from_secs(6));
+    person.tab()?;
+    person.enter()?;
+    sleep(Duration::from_secs(3));
+    Ok(())
 }
 
 /// The Codex app's first run: what kind of work, a setup to skip, then the new thread `--open-project` asked for. Each
@@ -630,8 +778,8 @@ fn drive(page: &mut Page, scenario: &Scenario, turns: &mut Turns) -> Result<()> 
     Ok(())
 }
 
-/// The app is in front once Kairos says so, and the project the link opened has its message box in focus.
-fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns) -> Result<()> {
+/// The app is in front once Kairos says so, and after `start` the project the link opened has its message box in focus.
+fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns, start: impl FnOnce() -> Result<()>) -> Result<()> {
     let until = Instant::now() + Duration::from_secs(90);
     while !crate::events(kd)?.iter().any(|e| e["kind"] == "focus" && e["class"] == "agent_app") {
         if Instant::now() > until {
@@ -640,6 +788,7 @@ fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns) -> Result<()> {
         sleep(Duration::from_millis(500));
     }
     sleep(Duration::from_secs(8));
+    start()?;
     let person = turns.person.clone();
     for (i, turn) in scenario.turns.iter().enumerate() {
         let send = |prompt: &str| -> Result<()> {
@@ -691,7 +840,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         Drive::Page => cmd.arg(format!("--remote-debugging-port={PORT}")),
         // The project the way `antigravity-ide .` opens it. Basic keeps Linux from asking which keyring to use.
         Drive::Panel => cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project),
-        Drive::Keys => cmd.arg(format!("opencode://open-project?directory={}", p.project.display())),
+        Drive::Keys(link) => cmd.arg(link(&p.project)),
     };
     if app.id == "antigravity-ide" {
         antigravity_setup(&p.home, &cli)?;
@@ -717,6 +866,9 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     }
     for (k, v) in &launch.env {
         cmd.env(k, v);
+    }
+    if app.id == "claude-desktop" {
+        claude_policy(&url, &p.run)?;
     }
     let bin = cli.parent().context("the harness has no folder")?.to_path_buf();
     let bin_dir = bin.clone();
@@ -753,7 +905,10 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
             }
             r
         }),
-        Drive::Keys => type_in(&scenario, &p.kd, &mut turns),
+        Drive::Keys(link) => type_in(&scenario, &p.kd, &mut turns, || match app.id {
+            "claude-desktop" => claude_start(&person, &exe, &link(&p.project), &p.home, &p.run),
+            _ => Ok(()),
+        }),
     };
     // Readers look every 3 s and saves are batched for 2 s.
     sleep(Duration::from_secs(8));
@@ -774,6 +929,11 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         // The agent's server the app started from the harness's own folder, or agy from the run's home.
         let _ = Command::new("pkill").arg("-f").arg(&bin_dir).status();
         let _ = Command::new("pkill").arg("-f").arg(p.home.join(".gemini").join("bin")).status();
+        // The Claude Code Claude desktop downloaded for itself.
+        let _ = Command::new("pkill").arg("-f").arg("Claude-3p/claude-code").status();
+    }
+    if app.id == "claude-desktop" {
+        claude_policy_off();
     }
     let _ = child.kill();
     let _ = child.wait();
