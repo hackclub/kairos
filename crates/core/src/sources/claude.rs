@@ -1,7 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::claude_history::History;
 use super::t3code::T3Code;
@@ -61,6 +61,7 @@ fn other_config_dir_in(home: &Path, usual: &Path, session: &str) -> Option<PathB
 }
 
 const SHOWN_CAP: usize = 2000;
+const SEEN_CAP: usize = 2000;
 const COWORK: &str = "local-agent-mode-sessions";
 
 fn skip(p: &Path) -> bool {
@@ -141,11 +142,34 @@ impl Turn {
     }
 }
 
+// Claude Code writes a session's lines again, same uuid and time, into the file of a session it continues in the
+// background or forks with `--fork-session`, and moves a session's file when it enters a worktree. So the uuids of
+// lines that reported something are kept, and a line read again sets up its turn but reports nothing.
+#[derive(Default)]
+struct Seen {
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl Seen {
+    fn add(&mut self, id: &str) {
+        if self.ids.insert(id.to_string()) {
+            self.order.push_back(id.to_string());
+        }
+        while self.order.len() > SEEN_CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+    }
+}
+
 pub struct Claude {
     tail: Tail,
     turns: HashMap<PathBuf, Turn>,
     history: History,
     t3: T3Code,
+    seen: Seen,
 }
 
 impl Claude {
@@ -154,7 +178,7 @@ impl Claude {
     }
 
     fn with_t3(roots: Vec<PathBuf>, t3: T3Code) -> Claude {
-        Claude { history: History::new(&roots), tail: Tail::new(roots, "jsonl", skip), turns: HashMap::new(), t3 }
+        Claude { history: History::new(&roots), tail: Tail::new(roots, "jsonl", skip), turns: HashMap::new(), t3, seen: Seen::default() }
     }
 }
 
@@ -451,13 +475,24 @@ impl Source for Claude {
 
     fn poll(&mut self) -> Vec<Found> {
         let mut out = Vec::new();
-        let (turns, t3) = (&mut self.turns, &mut self.t3);
+        let (turns, t3, seen) = (&mut self.turns, &mut self.t3, &mut self.seen);
         self.tail.poll(|path, line| {
-            if let Ok(e) = serde_json::from_str::<Value>(line) {
-                let turn = turns
-                    .entry(path.to_path_buf())
-                    .or_insert_with(|| Turn { folder: cowork_folder(path), started: started_name(path), sub: subagent(path), ..Turn::default() });
-                feed(turn, &e, t3, &mut out);
+            let Ok(e) = serde_json::from_str::<Value>(line) else { return };
+            // `/branch` copies a session's lines into a new one, each saying what it was forked from. Skipping them
+            // also covers copies of lines reported too long ago to still be in `seen`.
+            if e.get("forkedFrom").is_some() {
+                return;
+            }
+            let turn = turns
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Turn { folder: cowork_folder(path), started: started_name(path), sub: subagent(path), ..Turn::default() });
+            let id = e.get("uuid").and_then(Value::as_str);
+            let from = out.len();
+            feed(turn, &e, t3, &mut out);
+            match id {
+                Some(id) if seen.ids.contains(id) => out.truncate(from),
+                Some(id) if out.len() > from => seen.add(id),
+                _ => {}
             }
         });
         self.turns.retain(|p, _| p.exists());
@@ -469,11 +504,18 @@ impl Source for Claude {
     }
 
     fn state(&self) -> Value {
-        self.tail.state()
+        let mut state = self.tail.state();
+        if let Some(m) = state.as_object_mut() {
+            m.insert("seen".into(), json!(self.seen.order));
+        }
+        state
     }
 
     fn restore(&mut self, state: &Value) {
         self.tail.restore(state);
+        for id in state.get("seen").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            self.seen.add(id);
+        }
     }
 }
 
@@ -614,6 +656,100 @@ mod tests {
         let kinds: Vec<&str> = src.poll().iter().map(|f| f.kind.name()).collect();
         assert_eq!(kinds, ["reply_done"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tag(line: &str, uuid: &str, session: &str) -> String {
+        let mut v: Value = serde_json::from_str(line).unwrap();
+        v["uuid"] = json!(uuid);
+        v["sessionId"] = json!(session);
+        v.to_string()
+    }
+
+    fn names(out: &[Found]) -> Vec<(&'static str, Option<&str>)> {
+        out.iter().map(|f| (f.kind.name(), f.kind.session())).collect()
+    }
+
+    fn append(f: &Path, lines: &[String]) {
+        let mut text = std::fs::read_to_string(f).unwrap_or_default();
+        lines.iter().for_each(|l| text.push_str(&format!("{l}\n")));
+        std::fs::write(f, text).unwrap();
+    }
+
+    // What Claude Code 2.1 writes: a session sent to the background goes on as a new session whose file starts with
+    // every line of the old one (same uuid and timestamp, new sessionId), and a session that enters a worktree has its
+    // file moved to that worktree's log folder, in the middle of a turn.
+    #[test]
+    fn lines_copied_into_a_continued_or_moved_session_are_not_reported_again() {
+        let dir = std::env::temp_dir().join(format!("kairos-claude-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("-w-p")).unwrap();
+        let a = dir.join("-w-p/s1.jsonl");
+        std::fs::write(&a, "").unwrap();
+        let mut src = Claude::new(vec![dir.clone()]);
+        assert!(src.poll().is_empty());
+        let first = [(P, "u1"), (TOOL, "u2"), (RES, "u3"), (DONE, "u4")];
+        append(&a, &first.map(|(l, id)| tag(l, id, "s1")));
+        let s1 = Some("s1");
+        assert_eq!(names(&src.poll()), [("prompt", s1), ("agent_start", s1), ("reply_done", s1)]);
+
+        let b = dir.join("-w-p/s2.jsonl");
+        let same_words_later = tag(&P.replace("10:00:00", "10:05:00"), "u5", "s2");
+        append(&b, &first.map(|(l, id)| tag(l, id, "s2")));
+        append(&b, &[same_words_later]);
+        let out = src.poll();
+        assert_eq!(names(&out), [("prompt", Some("s2"))], "only the prompt typed after it went to the background");
+        assert_eq!(out[0].ts, base("10:05:00"));
+
+        append(&b, &[tag(&TOOL.replace("10:00:05", "10:05:05"), "u6", "s2")]);
+        assert_eq!(names(&src.poll()), [("agent_start", Some("s2"))]);
+        let moved = dir.join("-w-p--claude-worktrees-x/s2.jsonl");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&b, &moved).unwrap();
+        append(&moved, &[tag(&DONE.replace("10:01:00", "10:06:00"), "u7", "s2")]);
+        let out = src.poll();
+        assert_eq!(names(&out), [("reply_done", Some("s2"))], "the moved file's turn goes on where it was");
+        assert_eq!(out[0].ts, base("10:06:00"));
+
+        // Continued while kairosd was not running.
+        let mut again = Claude::new(vec![dir.clone()]);
+        again.restore(&src.state());
+        append(&dir.join("-w-p/s3.jsonl"), &first.map(|(l, id)| tag(l, id, "s3")));
+        assert!(again.poll().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forked_session_reports_only_what_comes_after_the_fork() {
+        let dir = std::env::temp_dir().join(format!("kairos-claude-fork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("-w-p")).unwrap();
+        let mut src = Claude::new(vec![dir.clone()]);
+        assert!(src.poll().is_empty());
+        // Fresh uuids, so the tag alone keeps the copies out.
+        let forked = |l: &str, id: &str, from: &str| {
+            let mut v: Value = serde_json::from_str(&tag(l, id, "s9")).unwrap();
+            v["forkedFrom"] = json!({"sessionId": "s1", "messageUuid": from});
+            v.to_string()
+        };
+        let f = dir.join("-w-p/s9.jsonl");
+        let done = DONE.replace("10:01:00", "10:30:00");
+        append(&f, &[forked(P, "f1", "u1"), forked(TOOL, "f2", "u2"), forked(RES, "f3", "u3"), forked(&done, "f4", "u4")]);
+        assert!(src.poll().is_empty());
+        append(&f, &[tag(&P.replace("10:00:00", "10:31:00"), "f5", "s9")]);
+        assert_eq!(names(&src.poll()), [("prompt", Some("s9"))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_newest_reported_lines_are_kept() {
+        let mut seen = Seen::default();
+        for i in 0..SEEN_CAP + 5 {
+            seen.add(&format!("u{i}"));
+        }
+        seen.add("u10");
+        assert_eq!(seen.order.len(), SEEN_CAP);
+        assert!(!seen.ids.contains("u4") && seen.ids.contains("u5") && seen.ids.contains("u10"));
+        assert_eq!(seen.ids.len(), SEEN_CAP);
     }
 
     #[test]
