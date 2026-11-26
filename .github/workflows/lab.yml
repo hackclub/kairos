@@ -14,12 +14,13 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: ""
+  CANDIDATE: "45792120212"
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: "codex-app"
-  SYSTEMS: "macos,windows"
-  LAB_DUMP: ${{ github.workspace }}/work/dump.jsonl
+  ONLY: ""
+  SYSTEMS: "linux,macos"
+  # The list of runs: versions.txt, or ci/mux.txt for the tmux and screen runs.
+  VERSIONS: ci/mux.txt
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
@@ -67,7 +68,7 @@ jobs:
         if: runner.os == 'Linux' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'linux'))
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends xvfb openbox x11-utils xdotool gnome-terminal dbus-x11
+          sudo apt-get install -y -q --no-install-recommends xvfb openbox x11-utils xdotool gnome-terminal dbus-x11 tmux screen
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x800x24 > /dev/null 2>&1 &
           for i in $(seq 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done
@@ -80,12 +81,30 @@ jobs:
       - name: every version (macOS)
         if: runner.os == 'macOS' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'macos'))
         run: |
-          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
+          if grep -q tmux "$VERSIONS"; then HOMEBREW_NO_AUTO_UPDATE=1 brew install -q tmux; fi
+          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"
           for i in $(seq 3300); do [ -f failed.txt ] && break; sleep 2; done
           cat result.txt
           exit "$(cat failed.txt)"
+      # Bug 41: kairosd kept the folder it was started in, and Windows can't rename or delete a folder a process is in.
+      # After the runs, which use the real home.
+      - name: kairosd leaves the folder it starts in (Windows)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $here = (New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "kd-start")).FullName
+          $env:KAIROS_DIR = (New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "kd-data")).FullName
+          $p = Start-Process -FilePath (Resolve-Path "dist/${{ matrix.target }}/kairosd.exe").Path -WorkingDirectory $here -PassThru -WindowStyle Hidden
+          Start-Sleep 5
+          if ($p.HasExited) { "FAIL kairosd quit right away ($($p.ExitCode))"; exit 1 }
+          $moved = $true
+          try { Rename-Item $here "kd-start-moved" -ErrorAction Stop } catch { $moved = $false; "FAIL kairosd still holds the folder it started in: $_" }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $moved) { exit 1 }
+          "PASS kairosd left the folder it started in"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -18,6 +18,6 @@ while read -r harness version scenario <&3; do
   if grep -E "^(PASS|FAIL|SKIP|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
   cat part.txt >> result.txt
   rm -rf work/tools
-done 3< <(tr -d '\r' < versions.txt)
+done 3< <(tr -d '\r' < "${VERSIONS:-versions.txt}")
 echo "$failed" > failed.txt
 exit "$failed"

@@ -1,0 +1,6 @@
+claude-code latest tmux
+codex latest tmux
+opencode 2.x tmux
+antigravity latest tmux
+claude-code latest screen
+opencode 2.x screen
