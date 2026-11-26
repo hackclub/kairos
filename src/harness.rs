@@ -152,14 +152,16 @@ fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result
     let dir = home.join(".codex");
     fs::create_dir_all(&dir)?;
     // The folder is trusted up front, the way Codex itself saves it: its trust question comes up seconds after the
-    // prompt on a slow machine, and typing would land in it.
-    let config = format!(
-        "model = \"gpt-5.1-codex\"\nmodel_provider = \"lab\"\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n\n\
-         [model_providers.lab]\nname = \"lab\"\nbase_url = \"{model_url}/v1\"\nwire_api = \"responses\"\nenv_key = \"LAB_KEY\"\n\n\
-         [projects.'{}']\ntrust_level = \"trusted\"\n",
-        project.display()
-    );
-    fs::write(dir.join("config.toml"), config)?;
+    // prompt on a slow machine, and typing would land in it. A second project in the same run adds its own.
+    let path = dir.join("config.toml");
+    let mut config = fs::read_to_string(&path).unwrap_or_else(|_| {
+        format!(
+            "model = \"gpt-5.1-codex\"\nmodel_provider = \"lab\"\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n\n\
+             [model_providers.lab]\nname = \"lab\"\nbase_url = \"{model_url}/v1\"\nwire_api = \"responses\"\nenv_key = \"LAB_KEY\"\n"
+        )
+    });
+    config += &format!("\n[projects.'{}']\ntrust_level = \"trusted\"\n", project.display());
+    fs::write(&path, config)?;
     Ok(Launch { args: Vec::new(), resume: vec!["resume".to_string(), "--last".to_string()], env: vars(&[("LAB_KEY", "lab")]), after: Vec::new() })
 }
 

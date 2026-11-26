@@ -1,5 +1,6 @@
 //! A model API that plays the scenario instead of thinking: each request of the armed turn gets the next scripted
 //! tool call, then the closing text. Tool call ids carry the turn and step, so a retried request gets the same answer.
+//! Two sessions at once each play their own scenario, told apart by the project folder their requests name.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,21 +14,27 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::scenario::{Act, Scenario};
 
-struct State {
+struct Lane {
     scenario: Arc<Scenario>,
     project: PathBuf,
     turn: Option<usize>,
     said: Vec<bool>,
     /// The turn's last request is being held open, for the person to press Esc.
     stalled: Vec<bool>,
+}
+
+struct State {
+    lanes: Vec<Lane>,
     requests: Vec<Value>,
     problems: Vec<String>,
 }
 
+/// One session's scenario on the model server.
 #[derive(Clone)]
 pub struct Model {
     pub port: u16,
     state: Arc<Mutex<State>>,
+    lane: usize,
 }
 
 enum Plan {
@@ -42,8 +49,7 @@ impl Model {
     pub fn start(scenario: Arc<Scenario>, project: PathBuf) -> Result<Model> {
         let server = Server::http("127.0.0.1:0").map_err(|e| anyhow!("{e}"))?;
         let port = server.server_addr().to_ip().ok_or_else(|| anyhow!("the model server has no port"))?.port();
-        let (said, stalled) = (vec![false; scenario.turns.len()], vec![false; scenario.turns.len()]);
-        let state = Arc::new(Mutex::new(State { scenario, project, turn: None, said, stalled, requests: Vec::new(), problems: Vec::new() }));
+        let state = Arc::new(Mutex::new(State { lanes: Vec::new(), requests: Vec::new(), problems: Vec::new() }));
         let shared = state.clone();
         thread::spawn(move || {
             for req in server.incoming_requests() {
@@ -51,19 +57,27 @@ impl Model {
                 thread::spawn(move || handle(&state, req));
             }
         });
-        Ok(Model { port, state })
+        Model { port, state, lane: 0 }.add(scenario, project)
+    }
+
+    /// A second session on the same server, working in another project.
+    pub fn add(&self, scenario: Arc<Scenario>, project: PathBuf) -> Result<Model> {
+        let (said, stalled) = (vec![false; scenario.turns.len()], vec![false; scenario.turns.len()]);
+        let mut s = self.state.lock().unwrap();
+        s.lanes.push(Lane { scenario, project, turn: None, said, stalled });
+        Ok(Model { port: self.port, state: self.state.clone(), lane: s.lanes.len() - 1 })
     }
 
     pub fn arm(&self, turn: usize) {
-        self.state.lock().unwrap().turn = Some(turn);
+        self.state.lock().unwrap().lanes[self.lane].turn = Some(turn);
     }
 
     pub fn said(&self, turn: usize) -> bool {
-        self.state.lock().unwrap().said[turn]
+        self.state.lock().unwrap().lanes[self.lane].said[turn]
     }
 
     pub fn stalled(&self, turn: usize) -> bool {
-        self.state.lock().unwrap().stalled[turn]
+        self.state.lock().unwrap().lanes[self.lane].stalled[turn]
     }
 
     pub fn problems(&self) -> Vec<String> {
@@ -80,21 +94,50 @@ fn pos(id: &str) -> Option<(usize, usize)> {
     Some((turn.parse().ok()?, step.parse().ok()?))
 }
 
-fn plan(state: &Mutex<State>, main: bool, answered: &[String]) -> Plan {
+/// The session a request is from: the one whose project folder it names (the longest, since one folder's name can
+/// start another's), else the only one, else the only one waiting on an answer.
+fn route(state: &Mutex<State>, raw: &str) -> Option<usize> {
+    let s = state.lock().unwrap();
+    let raw = if cfg!(windows) { raw.to_lowercase() } else { raw.to_string() };
+    let named = s.lanes.iter().enumerate().filter_map(|(i, l)| {
+        let p = l.project.to_string_lossy();
+        let p = if cfg!(windows) { p.to_lowercase() } else { p.into_owned() };
+        let forms = [p.clone(), p.replace('\\', "/"), p.replace('\\', "\\\\")];
+        forms.iter().any(|f| raw.contains(f.as_str())).then_some((p.len(), i))
+    });
+    if let Some((_, i)) = named.max() {
+        return Some(i);
+    }
+    if s.lanes.len() == 1 {
+        return Some(0);
+    }
+    let waiting: Vec<usize> = (0..s.lanes.len()).filter(|&i| s.lanes[i].turn.is_some_and(|t| !s.lanes[i].said[t])).collect();
+    match waiting.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+fn project(state: &Mutex<State>, lane: Option<usize>) -> PathBuf {
+    state.lock().unwrap().lanes[lane.unwrap_or(0)].project.clone()
+}
+
+fn plan(state: &Mutex<State>, lane: Option<usize>, main: bool, answered: &[String]) -> Plan {
     let mut s = state.lock().unwrap();
-    let Some(turn) = s.turn.filter(|_| main) else { return Plan::Side };
+    let Some(lane) = lane else { return Plan::Side };
+    let Some(turn) = s.lanes[lane].turn.filter(|_| main) else { return Plan::Side };
     let step = answered.iter().filter_map(|id| pos(id)).filter(|p| p.0 == turn).map(|p| p.1 + 1).max().unwrap_or(0);
-    let scenario = s.scenario.clone();
+    let scenario = s.lanes[lane].scenario.clone();
     match scenario.turns[turn].acts.get(step) {
         Some(act) => Plan::Act(format!("lab_{turn}_{step}"), *act),
         None if scenario.turns[turn].interrupt => {
-            s.stalled[turn] = true;
+            s.lanes[lane].stalled[turn] = true;
             Plan::Stall
         }
         None => {
             drop(s);
             thread::sleep(Duration::from_secs(scenario.turns[turn].wait));
-            state.lock().unwrap().said[turn] = true;
+            state.lock().unwrap().lanes[lane].said[turn] = true;
             Plan::Say(scenario.turns[turn].say.to_string())
         }
     }
@@ -108,7 +151,7 @@ fn sse(events: &[(&str, Value)]) -> String {
     events.iter().map(|(name, data)| format!("event: {name}\ndata: {data}\n\n")).collect()
 }
 
-fn anthropic(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
+fn anthropic(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static str, String, String) {
     let tools = body["tools"].as_array().cloned().unwrap_or_default();
     let offered = names(&tools);
     let main = ["Write", "Edit", "Bash"].iter().all(|n| offered.iter().any(|o| o == n));
@@ -121,9 +164,9 @@ fn anthropic(state: &Mutex<State>, body: &Value) -> (&'static str, String, Strin
         .filter(|b| b["type"] == "tool_result")
         .filter_map(|b| b["tool_use_id"].as_str().map(str::to_string))
         .collect();
-    let project = state.lock().unwrap().project.clone();
+    let project = project(state, lane);
     let file = |p: &str| project.join(p).to_string_lossy().into_owned();
-    let (note, block) = match plan(state, main, &answered) {
+    let (note, block) = match plan(state, lane, main, &answered) {
         Plan::Side => ("side".to_string(), json!({ "type": "text", "text": "ok" })),
         Plan::Stall => ("stall".to_string(), json!({ "type": "text", "text": "ok" })),
         Plan::Say(text) => ("say".to_string(), json!({ "type": "text", "text": text })),
@@ -238,7 +281,7 @@ fn offered(body: &Value) -> Vec<Value> {
 }
 
 /// `side`: a job the app runs on the side, like naming a thread, which offers the same tools.
-fn responses(state: &Mutex<State>, body: &Value, side: bool) -> (&'static str, String, String) {
+fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool) -> (&'static str, String, String) {
     let tools = offered(body);
     let input = body["input"].as_array().cloned().unwrap_or_default();
     let main = !side && !tools.is_empty() && !input.is_empty();
@@ -247,9 +290,9 @@ fn responses(state: &Mutex<State>, body: &Value, side: bool) -> (&'static str, S
         .filter(|i| i["type"].as_str().is_some_and(|t| t.ends_with("_output")))
         .filter_map(|i| i["call_id"].as_str().map(str::to_string))
         .collect();
-    let project = state.lock().unwrap().project.clone();
+    let project = project(state, lane);
     let message = |text: &str| json!({ "type": "message", "role": "assistant", "id": "msg_lab", "content": [{ "type": "output_text", "text": text }] });
-    let (note, item) = match plan(state, main, &answered) {
+    let (note, item) = match plan(state, lane, main, &answered) {
         Plan::Side => ("side".to_string(), message("ok")),
         Plan::Stall => ("stall".to_string(), message("ok")),
         Plan::Say(text) => ("say".to_string(), message(&text)),
@@ -316,7 +359,7 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
     Some((tool["name"].clone(), args))
 }
 
-fn chat(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
+fn chat(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static str, String, String) {
     let tools: Vec<Value> = body["tools"].as_array().into_iter().flatten().map(|t| t["function"].clone()).collect();
     let answered: Vec<String> = body["messages"]
         .as_array()
@@ -325,9 +368,9 @@ fn chat(state: &Mutex<State>, body: &Value) -> (&'static str, String, String) {
         .filter(|m| m["role"] == "tool")
         .filter_map(|m| m["tool_call_id"].as_str().map(str::to_string))
         .collect();
-    let project = state.lock().unwrap().project.clone();
+    let project = project(state, lane);
     let text = |t: &str| (json!({ "role": "assistant", "content": t }), "stop");
-    let (note, (delta, finish)) = match plan(state, !tools.is_empty(), &answered) {
+    let (note, (delta, finish)) = match plan(state, lane, !tools.is_empty(), &answered) {
         Plan::Side => ("side".to_string(), text("ok")),
         Plan::Stall => ("stall".to_string(), text("ok")),
         Plan::Say(t) => ("say".to_string(), text(&t)),
@@ -369,23 +412,24 @@ fn handle(state: &Mutex<State>, mut req: Request) {
         }
     }
     let path = url.split('?').next().unwrap_or_default();
+    let lane = route(state, &raw);
     let (ctype, out, note) = if *req.method() != Method::Post {
         ("application/json", json!({ "object": "list", "data": [] }).to_string(), "get".to_string())
     } else if path.ends_with("/messages/count_tokens") {
         ("application/json", json!({ "input_tokens": 42 }).to_string(), "count".to_string())
     } else if path.ends_with("/messages") {
-        anthropic(state, &body)
+        anthropic(state, lane, &body)
     } else if path.ends_with("/responses") {
         // T3 Code names threads and writes commit messages with `codex exec`, which the lab never runs as the harness.
         let side = req.headers().iter().any(|h| h.field.equiv("User-Agent") && h.value.as_str().contains("codex_exec"));
-        responses(state, &body, side)
+        responses(state, lane, &body, side)
     } else if path.ends_with("/chat/completions") {
-        chat(state, &body)
+        chat(state, lane, &body)
     } else {
         ("application/json", "{}".to_string(), "unknown".to_string())
     };
     let tools = names(&offered(&body));
-    let record = json!({ "method": req.method().as_str(), "path": url, "model": body["model"], "stream": body["stream"], "tools": tools, "reply": note });
+    let record = json!({ "method": req.method().as_str(), "path": url, "model": body["model"], "stream": body["stream"], "tools": tools, "lane": lane, "reply": note });
     state.lock().unwrap().requests.push(record);
     if note.starts_with("lab_") || note == "say" {
         thread::sleep(Duration::from_millis(1000));

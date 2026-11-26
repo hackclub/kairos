@@ -210,6 +210,59 @@ hello util
 exit code 0
 ";
 
+/// Two sessions at once, the first in the lab's own window and the second in another window in another project. The
+/// person looks away from the first during its turns: briefly, for long, and at the second one's work.
+pub fn two() -> (Scenario, Scenario) {
+    let first = Scenario {
+        name: "two",
+        turns: vec![
+            Turn {
+                prompt: "please write a small hello program in python, then commit it",
+                acts: vec![
+                    Act::Write { path: "hello.py", content: "def greet(name):\n    return \"hello \" + name\n\n\nprint(greet(\"world\"))\n" },
+                    Act::Shell { cmd: "git add -A" },
+                    Act::Shell { cmd: "git commit -m \"add hello\"" },
+                ],
+                say: "Done. I wrote hello.py and committed it.",
+                ..Turn::default()
+            },
+            Turn {
+                prompt: "now greet one more name and leave it uncommitted",
+                acts: vec![Act::Edit { path: "hello.py", old: "print(greet(\"world\"))", new: "print(greet(\"kairos\"))\nprint(greet(\"lab\"))" }],
+                say: "Added one more greeting.",
+                wait: 50,
+                ..Turn::default()
+            },
+            Turn {
+                prompt: "move the names into a small module in a folder called pkg",
+                acts: vec![Act::Write { path: "pkg/util.py", content: "NAMES = [\"kairos\", \"lab\"]\n" }],
+                say: "The names are in pkg/util.py now.",
+                wait: 30,
+                ..Turn::default()
+            },
+            Turn { prompt: "ok stop there, that is enough for today", say: "Stopped.", ..Turn::default() },
+        ],
+    };
+    let second = Scenario {
+        name: "two, second window",
+        turns: vec![
+            Turn {
+                prompt: "write a short todo list in todo.md",
+                acts: vec![Act::Write { path: "todo.md", content: "- read the docs\n- try the lab\n" }],
+                say: "Wrote todo.md.",
+                ..Turn::default()
+            },
+            Turn {
+                prompt: "add one more item to it",
+                acts: vec![Act::Edit { path: "todo.md", old: "- try the lab", new: "- try the lab again\n- ship it" }],
+                say: "Added one.",
+                ..Turn::default()
+            },
+        ],
+    };
+    (first, second)
+}
+
 /// For an app: the first five turns, typed into its own window, with the kairosd restart.
 pub fn app() -> Scenario {
     let mut s = basic();

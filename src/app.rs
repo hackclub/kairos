@@ -271,7 +271,8 @@ fn codex_app(want: &str) -> Result<(String, String)> {
     Ok((version, url))
 }
 
-/// The Codex app's first run, which the lab doesn't know yet: each screen it shows and what the lab clicked there.
+/// The Codex app's first run: what kind of work, a setup to skip, then the new thread `--open-project` asked for. Each
+/// screen it shows and what the lab clicked there are kept in the run folder.
 fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
     sleep(Duration::from_secs(30));
     let mut log = String::new();
@@ -289,21 +290,24 @@ fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
             did.push("Engineering");
             sleep(Duration::from_secs(1));
         }
-        let ways = ["Go to ChatGPT", "Skip", "Continue", "Continue without administrator access", "Choose project", "proj"];
+        let ways = ["Go to ChatGPT", "Skip", "Continue", "Continue without administrator access"];
         let roles = ["button", "link", "tab", "menuitem", "menuitemradio", "option", "radio"];
-        let once = ["Choose project", "proj"];
-        if let Some(name) = ways.into_iter().find(|n| has(&roles, n) && !(once.contains(n) && log.contains(*n))) {
+        if let Some(name) = ways.into_iter().find(|n| has(&roles, n)) {
             page.ax_click(&roles, name)?;
             did.push(name);
         }
         log += &format!("step {step}: clicked {did:?}\n");
         if did.is_empty() {
-            break;
+            fs::write(run.join("steps.txt"), &log)?;
+            if !ax.iter().any(|(r, _, _)| r == "textbox") {
+                bail!("the Codex app shows no message box:\n{log}");
+            }
+            return Ok(());
         }
         sleep(Duration::from_secs(5));
     }
     fs::write(run.join("steps.txt"), &log)?;
-    bail!("the lab can't drive the Codex app yet:\n{log}")
+    bail!("the Codex app kept asking:\n{log}")
 }
 
 struct Page {
@@ -610,7 +614,8 @@ fn antigravity_setup(home: &Path, agy: &Path) -> Result<()> {
 }
 
 fn drive(page: &mut Page, scenario: &Scenario, turns: &mut Turns) -> Result<()> {
-    let composer = "[...document.querySelectorAll('[contenteditable=true]')].find(e => e.getBoundingClientRect().width > 0)";
+    let composer = "(() => { const shown = q => [...document.querySelectorAll(q)].find(e => e.getBoundingClientRect().width > 0); \
+                    return shown('[contenteditable=true]') ?? shown('textarea'); })()";
     let page = std::cell::RefCell::new(page);
     for (i, turn) in scenario.turns.iter().enumerate() {
         let send = |prompt: &str| -> Result<()> {
@@ -681,6 +686,8 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let log = || OpenOptions::new().create(true).append(true).open(p.run.join("app.log"));
     let mut cmd = Command::new(&exe);
     match app.drive {
+        // The Codex app opens a new thread in the folder after --open-project.
+        Drive::Page if matches!(app.source, Source::Codex) => cmd.arg(format!("--remote-debugging-port={PORT}")).arg("--open-project").arg(&p.project),
         Drive::Page => cmd.arg(format!("--remote-debugging-port={PORT}")),
         // The project the way `antigravity-ide .` opens it. Basic keeps Linux from asking which keyring to use.
         Drive::Panel => cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project),

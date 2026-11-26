@@ -1,7 +1,9 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::num::NonZeroU16;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +16,10 @@ pub const DOWN: &str = "\x1b[B";
 pub const ESC: &str = "\x1b";
 const ROWS: NonZeroU16 = NonZeroU16::new(40).unwrap();
 const COLS: NonZeroU16 = NonZeroU16::new(120).unwrap();
+
+pub fn size() -> PtySize {
+    PtySize { rows: ROWS.get(), cols: COLS.get(), pixel_width: 0, pixel_height: 0 }
+}
 
 /// What a real terminal sends back when a program asks about it (cursor position, colours, device type). Codex asks
 /// all of these at startup, and a person's terminal always answers.
@@ -35,29 +41,53 @@ fn answers(out: &[u8], (row, col): (u16, u16)) -> String {
     reply
 }
 
+enum Proc {
+    Local(Box<dyn Child + Send + Sync>),
+    /// In a pty another lab process holds in its own terminal window, over a socket that closes when the program ends.
+    Remote(Arc<AtomicBool>, TcpStream),
+}
+
 /// A program running in a pty, with the screen a person would see.
 pub struct Term {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<vt100::Parser>>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Proc,
 }
 
 impl Term {
     /// `raw_path` gets every byte the program wrote and a `.screens` file next to it gets each new screen with its time,
     /// for when the last screen alone does not explain a run.
     pub fn spawn(cmd: CommandBuilder, raw_path: &Path) -> Result<Term> {
-        let mut raw = File::create(raw_path)?;
-        let pair = native_pty_system().openpty(PtySize { rows: ROWS.get(), cols: COLS.get(), pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("{e}"))?;
+        let pair = native_pty_system().openpty(size()).map_err(|e| anyhow!("{e}"))?;
         let child = pair.slave.spawn_command(cmd).map_err(|e| anyhow!("{e}"))?;
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("{e}"))?;
-        let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| anyhow!("{e}"))?));
+        let reader = pair.master.try_clone_reader().map_err(|e| anyhow!("{e}"))?;
+        let writer = pair.master.take_writer().map_err(|e| anyhow!("{e}"))?;
+        // The master has to outlive the reader, or the child gets a hangup.
+        Term::wire(reader, writer, Box::new(pair.master), Proc::Local(child), raw_path)
+    }
+
+    /// A program the lab started in another terminal window, through `stream`.
+    pub fn remote(stream: TcpStream, raw_path: &Path) -> Result<Term> {
+        let ended = Arc::new(AtomicBool::new(false));
+        let reader = Ended { stream: stream.try_clone()?, ended: ended.clone() };
+        Term::wire(Box::new(reader), Box::new(stream.try_clone()?), Box::new(()), Proc::Remote(ended, stream), raw_path)
+    }
+
+    fn wire(
+        mut reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        keep: Box<dyn std::any::Any + Send>,
+        child: Proc,
+        raw_path: &Path,
+    ) -> Result<Term> {
+        let mut raw = File::create(raw_path)?;
+        let writer = Arc::new(Mutex::new(writer));
         let answer = writer.clone();
         let parser = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 0)));
         let seen = parser.clone();
         thread::spawn(move || {
-            // The master has to outlive the reader, or the child gets a hangup.
-            let _master = pair.master;
+            let _keep = keep;
             let mut buf = [0u8; 8192];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
@@ -125,11 +155,41 @@ impl Term {
     }
 
     pub fn exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        match &mut self.child {
+            Proc::Local(child) => matches!(child.try_wait(), Ok(Some(_))),
+            Proc::Remote(ended, _) => ended.load(Ordering::Relaxed),
+        }
     }
 
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.child {
+            Proc::Local(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            // The other window ends its program when the socket closes.
+            Proc::Remote(ended, stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                let until = Instant::now() + Duration::from_secs(5);
+                while !ended.load(Ordering::Relaxed) && Instant::now() < until {
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+}
+
+struct Ended {
+    stream: TcpStream,
+    ended: Arc<AtomicBool>,
+}
+
+impl Read for Ended {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.stream.read(buf);
+        if !matches!(n, Ok(1..)) {
+            self.ended.store(true, Ordering::Relaxed);
+        }
+        n
     }
 }

@@ -2,9 +2,11 @@ mod app;
 mod credit;
 mod harness;
 mod model;
+mod pane;
 mod person;
 mod scenario;
 mod term;
+mod two;
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -23,7 +25,8 @@ use person::Person;
 use scenario::Scenario;
 use term::{Term, ENTER, ESC};
 
-const USAGE: &str = "usage: lab run <harness or app> [version|latest|N.x] --kairosd PATH [--work DIR] [--save DIR] [--real-home] [--window]";
+const USAGE: &str =
+    "usage: lab run <harness or app> [version|latest|N.x] --kairosd PATH [--scenario basic|two] [--work DIR] [--save DIR] [--real-home] [--window]";
 /// Set on a developer's machine or in CI, they would point the harness and kairosd away from the run's own home.
 const STRAY_ENV: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -47,11 +50,13 @@ struct Args {
     real_home: bool,
     /// The lab runs in the terminal window in front, so Kairos has to see the agent there.
     window: bool,
+    scenario: String,
 }
 
 fn args() -> Result<Args> {
     let mut words = Vec::new();
     let (mut kairosd, mut work, mut save, mut real_home, mut window) = (None, PathBuf::from("work"), None, false, false);
+    let mut scenario = "basic".to_string();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -60,6 +65,7 @@ fn args() -> Result<Args> {
             "--save" => save = it.next().map(PathBuf::from),
             "--real-home" => real_home = true,
             "--window" => window = true,
+            "--scenario" => scenario = it.next().context(USAGE)?,
             _ => words.push(a),
         }
     }
@@ -74,6 +80,7 @@ fn args() -> Result<Args> {
         save,
         real_home,
         window,
+        scenario,
     })
 }
 
@@ -309,11 +316,27 @@ fn front(all: &[Value], harness: &str, class: &str, closed: &[(f64, f64)]) -> Ve
 
 /// `version` is the harness's, when the lab knows which one runs (an app brings its own).
 fn check(h: &Harness, version: Option<&str>, scenario: &Scenario, esc: &[Option<f64>], all: &[Value], project: &Path) -> Result<Vec<String>> {
+    let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
+    let saves: Vec<&Value> = all.iter().filter(|e| e["kind"] == "file_save").collect();
+    check_session(h, version, scenario, esc, &mine, &saves, project, "proj")
+}
+
+/// One session's events (`mine`) against its script, and the file saves in its project, named `name` by Kairos.
+#[allow(clippy::too_many_arguments)]
+fn check_session(
+    h: &Harness,
+    version: Option<&str>,
+    scenario: &Scenario,
+    esc: &[Option<f64>],
+    mine: &[&Value],
+    saves: &[&Value],
+    project: &Path,
+    name: &str,
+) -> Result<Vec<String>> {
     let marks = version.is_some_and(|v| h.marks(v));
     let mut problems = Vec::new();
-    let mine: Vec<&Value> = all.iter().filter(|e| e["harness"] == h.id).collect();
     let files = scenario.files();
-    for save in all.iter().filter(|e| e["kind"] == "file_save") {
+    for save in saves {
         for path in save["paths"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             if !files.contains_key(path) {
                 problems.push(format!("file_save names {path}, a file the script never wrote"));
@@ -357,7 +380,7 @@ fn check(h: &Harness, version: Option<&str>, scenario: &Scenario, esc: &[Option<
             differ(&mut problems, n, "prompt.version", &prompt["version"], json!(v));
         }
         for e in got {
-            differ(&mut problems, n, &format!("{}.project", e["kind"].as_str().unwrap_or("?")), &e["project"], json!("proj"));
+            differ(&mut problems, n, &format!("{}.project", e["kind"].as_str().unwrap_or("?")), &e["project"], json!(name));
         }
         problems.dedup();
         differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
@@ -447,16 +470,23 @@ fn place(args: &Args, name: &str, version: &str, state: &[&str]) -> Result<Place
         run.join("home")
     };
     let (project, kd) = (run.join("proj"), run.join("kd"));
-    for d in [&home, &project, &kd] {
+    for d in [&home, &kd] {
         fs::create_dir_all(d)?;
     }
-    git(&project, &["init", "-q", "-b", "main"])?;
-    git(&project, &["config", "user.name", "lab"])?;
-    git(&project, &["config", "user.email", "lab@example.invalid"])?;
-    fs::write(project.join("README.md"), "# demo\n")?;
-    git(&project, &["add", "-A"])?;
-    git(&project, &["commit", "-q", "-m", "init"])?;
+    repo(&project)?;
     Ok(Place { run, home, project, kd })
+}
+
+/// A git repo with one commit, for the agent to work in.
+fn repo(project: &Path) -> Result<()> {
+    fs::create_dir_all(project)?;
+    git(project, &["init", "-q", "-b", "main"])?;
+    git(project, &["config", "user.name", "lab"])?;
+    git(project, &["config", "user.email", "lab@example.invalid"])?;
+    fs::write(project.join("README.md"), "# demo\n")?;
+    git(project, &["add", "-A"])?;
+    git(project, &["commit", "-q", "-m", "init"])?;
+    Ok(())
 }
 
 fn daemon(args: &Args, p: &Place) -> Result<Child> {
@@ -571,7 +601,55 @@ fn serve(project: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// The harness started the way a person starts it in a terminal.
+fn command(bin: &Path, args: &[String], project: &Path, home: &Path, env: &[(String, String)]) -> CommandBuilder {
+    // npm's launchers on Windows are batch files, which only cmd can start.
+    let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.arg("/c");
+        cmd.arg(bin);
+        cmd
+    } else {
+        CommandBuilder::new(bin)
+    };
+    cmd.args(args);
+    cmd.cwd(project);
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.env("TERM", "xterm-256color");
+    for k in STRAY_ENV {
+        cmd.env_remove(k);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// A person starts on the agent once it's up in their terminal. Kairos sees the new program a moment later (up to 15 s
+/// when the window stays in front), and keys pressed before that count for whatever ran there first, the lab itself
+/// here. Gives when Kairos saw it, or nothing after 30 s: the checks say what Kairos saw.
+fn wait_focus(kd: &Path, project: &str, since: f64) -> Result<Option<f64>> {
+    let until = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < until {
+        let seen = events(kd)?.iter().find_map(|e| {
+            let ts = e["ts"].as_f64().filter(|&t| t >= since)?;
+            (e["kind"] == "focus" && e["class"] == "agent_terminal" && e["project"] == project).then_some(ts)
+        });
+        if seen.is_some() {
+            return Ok(seen);
+        }
+        sleep(Duration::from_millis(300));
+    }
+    Ok(None)
+}
+
 fn run() -> Result<bool> {
+    if std::env::args().nth(1).as_deref() == Some("pane") {
+        let mut words = std::env::args().skip(2);
+        let (Some(port), Some(away)) = (words.next(), words.next()) else { bail!("usage: lab pane <port> <folder>") };
+        return pane::serve(&port, &away);
+    }
     if std::env::args().nth(1).as_deref() == Some("model") {
         return serve(&std::env::args().nth(2).context("usage: lab model <project folder>")?);
     }
@@ -591,6 +669,12 @@ fn run() -> Result<bool> {
         return app::run(app, &args);
     }
     let h = harness::find(&args.harness)?;
+    if args.scenario == "two" {
+        return two::run(h, &args);
+    }
+    if args.scenario != "basic" {
+        bail!("no scenario {:?}, the lab knows basic and two", args.scenario);
+    }
     let root = std::path::absolute(&args.work)?;
     let (bin, version) = h.install(&args.version, &root.join("tools"))?;
     let p = place(&args, h.id, &version, h.state)?;
@@ -607,37 +691,10 @@ fn run() -> Result<bool> {
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(home, project, &url, &version)?;
-    let open = |args: &[String], raw: &str| -> Result<Term> {
-        // npm's launchers on Windows are batch files, which only cmd can start.
-        let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
-            let mut cmd = CommandBuilder::new("cmd.exe");
-            cmd.arg("/c");
-            cmd.arg(&bin);
-            cmd
-        } else {
-            CommandBuilder::new(&bin)
-        };
-        cmd.args(args);
-        cmd.cwd(project);
-        cmd.env("HOME", home);
-        cmd.env("USERPROFILE", home);
-        cmd.env("TERM", "xterm-256color");
-        for k in STRAY_ENV {
-            cmd.env_remove(k);
-        }
-        for (k, v) in &launch.env {
-            cmd.env(k, v);
-        }
-        Term::spawn(cmd, &run.join(raw))
-    };
+    let open = |args: &[String], raw: &str| -> Result<Term> { Term::spawn(command(&bin, args, project, home, &launch.env), &run.join(raw)) };
     let mut term = open(&launch.args, "pty.raw")?;
     if args.window {
-        // A person starts on the agent once it's up in their terminal. Kairos sees the new program a moment later, and
-        // keys pressed before that count for whatever ran there first, the lab itself here.
-        let until = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < until && !events(kd)?.iter().any(|e| e["kind"] == "focus" && e["class"] == "agent_terminal") {
-            sleep(Duration::from_millis(300));
-        }
+        wait_focus(kd, "proj", 0.0)?;
     }
     let mut reopen = || open(&launch.resume, "pty2.raw");
     let mut restart = || -> Result<()> {

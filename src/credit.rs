@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use kairos_core::credit::{Rule, BRIDGE_WAIT_SECS};
+use kairos_core::credit::{Credit, Rule, BRIDGE_WAIT_SECS, TRIP_MAX_SECS};
 use kairos_core::event::{Event, Kind};
 
 use crate::person::Person;
@@ -66,6 +66,117 @@ pub fn show(kd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Credit long after the person last touched anything.
+fn hands_off(credited: &[Span], person: &Person, problems: &mut Vec<String>) {
+    let allowed = union(person.inputs().iter().map(|&t| (t - 1.0, t + BRIDGE_WAIT_SECS + 2.0)).collect());
+    let over = secs(credited) - secs(&meet(credited, &allowed));
+    if over > 1.0 {
+        problems.push(format!("{over:.0} s of credit came while nobody had touched anything for over {BRIDGE_WAIT_SECS:.0} s"));
+    }
+}
+
+/// The time kairosd saw: each minute it wrote down, since it started or last found nobody there.
+fn seen(events: &[Event]) -> Vec<Span> {
+    let mut seen = Vec::new();
+    let mut since = f64::MIN;
+    for e in events {
+        match e.kind {
+            Kind::Start { .. } | Kind::Idle {} => since = e.ts,
+            Kind::Present { .. } => seen.push(((e.ts - 60.0).max(since), e.ts)),
+            _ => {}
+        }
+    }
+    union(seen)
+}
+
+/// kairosd looks at the window in front every few seconds, so it sees a switch this late at most.
+pub const LOOKS: f64 = 5.0;
+
+/// A stretch of the run with one window in front: from, to, and the project of the agent in it (none for a window
+/// that is no project's).
+pub type Shown = (f64, f64, Option<&'static str>);
+
+/// The credit rule over a run with several windows: credit for a project only while its window was in front, or on a
+/// quick look elsewhere between two stretches of it (a trip), and what the person read and typed in each window
+/// credited to its project.
+pub fn check_windows(kd: &Path, shown: &[Shown], person: &Person) -> Result<(Vec<String>, String)> {
+    let mut problems = Vec::new();
+    let events = read(kd, &mut problems)?;
+    let credits = Rule::CURRENT.apply(&events);
+    let first = shown.first().map_or(0.0, |s| s.0);
+    let mut may: BTreeMap<&str, Vec<Span>> = BTreeMap::new();
+    let mut owed: Vec<(&str, Span, String)> = Vec::new();
+    for &(from, to, project) in shown {
+        if let Some(p) = project {
+            may.entry(p).or_default().push((from, to + LOOKS));
+            owed.push((p, (from + LOOKS, to), format!("{p}'s window in front at +{:.0} s", from - first)));
+        }
+    }
+    // A trip: the windows between two stretches of a project's, for at most TRIP_MAX in all. Kairos sees each switch
+    // up to LOOKS late, so a trip near the limit may go either way.
+    let projects: Vec<&str> = may.keys().copied().collect();
+    for p in projects {
+        let n = shown.len();
+        let mut i = 0;
+        loop {
+            let Some(start) = (i..n).find(|&k| shown[k].2 == Some(p)) else { break };
+            let Some(j) = (start..n).find(|&k| shown[k].2 != Some(p)) else { break };
+            let Some(end) = (j..n).find(|&k| shown[k].2 == Some(p)) else { break };
+            let (from, to) = (shown[j].0, shown[end].0);
+            if to - from <= TRIP_MAX_SECS + LOOKS {
+                may.entry(p).or_default().push((from, to + LOOKS));
+            }
+            if to - from <= TRIP_MAX_SECS - LOOKS {
+                for &(a, b, _) in shown[j..end].iter().filter(|s| s.2.is_none()) {
+                    owed.push((p, (a, b), format!("a {:.0} s look away from {p} at +{:.0} s", to - from, a - first)));
+                }
+            }
+            i = end;
+        }
+    }
+    let mut wrong: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    for c in &credits {
+        let p = c.project.as_deref().unwrap_or("none");
+        let allowed = union(may.get(p).cloned().unwrap_or_default());
+        let span = [(c.start, c.end)];
+        let out = secs(&span) - secs(&meet(&span, &allowed));
+        if out > 0.5 {
+            let w = wrong.entry(format!("{} in project {p}", c.class.as_str())).or_insert((0.0, c.start - first));
+            w.0 += out;
+        }
+    }
+    for (what, (s, at)) in wrong {
+        if s > 1.0 {
+            problems.push(format!("{s:.0} s of credit was {what} while another window was in front (from +{at:.0} s)"));
+        }
+    }
+    hands_off(&union(credits.iter().map(|c| (c.start, c.end)).collect()), person, &mut problems);
+    let busy = meet(&union(person.busy_times()), &seen(&events));
+    for (p, span, what) in owed {
+        let want = secs(&meet(&busy, &[span]));
+        let got = secs(&meet(&union(credits.iter().filter(|c| c.project.as_deref() == Some(p)).map(|c| (c.start, c.end)).collect()), &[span]));
+        if want > 0.0 && got < want - (0.1 * want).max(3.0) {
+            problems.push(format!("{what}: {got:.0} s of credit for the {want:.0} s the person spent reading and typing"));
+        }
+    }
+    Ok((problems, summary(&credits, person, &busy)))
+}
+
+fn summary(credits: &[Credit], person: &Person, owed: &[Span]) -> String {
+    let mut by: BTreeMap<String, f64> = BTreeMap::new();
+    for c in credits {
+        *by.entry(format!("{} {}", c.project.as_deref().unwrap_or("none"), c.class.as_str())).or_default() += c.end - c.start;
+    }
+    let by: Vec<String> = by.iter().map(|(c, s)| format!("{c} {s:.0} s")).collect();
+    format!(
+        "credit {} ({:.0} s in all); the person read and typed {:.0} s, {:.0} s of it while kairosd could see",
+        if by.is_empty() { "none".to_string() } else { by.join(", ") },
+        secs(&union(credits.iter().map(|c| (c.start, c.end)).collect())),
+        secs(&union(person.busy_times())),
+        secs(owed),
+    )
+}
+
 pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result<(Vec<String>, String)> {
     let mut problems = Vec::new();
     let events = read(kd, &mut problems)?;
@@ -84,22 +195,8 @@ pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result
         problems.push(format!("{s:.0} s of credit was {what}, the person worked in {project}"));
     }
 
-    let allowed = union(person.inputs().iter().map(|&t| (t - 1.0, t + BRIDGE_WAIT_SECS + 2.0)).collect());
-    let over = secs(&credited) - secs(&meet(&credited, &allowed));
-    if over > 1.0 {
-        problems.push(format!("{over:.0} s of credit came while nobody had touched anything for over {BRIDGE_WAIT_SECS:.0} s"));
-    }
-
-    let mut seen = Vec::new();
-    let mut since = f64::MIN;
-    for e in &events {
-        match e.kind {
-            Kind::Start { .. } | Kind::Idle {} => since = e.ts,
-            Kind::Present { .. } => seen.push(((e.ts - 60.0).max(since), e.ts)),
-            _ => {}
-        }
-    }
-    let owed = meet(&union(person.busy_times()), &union(seen));
+    hands_off(&credited, person, &mut problems);
+    let owed = meet(&union(person.busy_times()), &seen(&events));
     let mine = |name: &str| -> Vec<&Event> { events.iter().filter(|e| e.harness.as_deref() == Some(harness) && e.kind.name() == name).collect() };
     let (prompts, replies) = (mine("prompt"), mine("reply_done"));
     // Each stretch is reading the last reply, then typing the next prompt.
