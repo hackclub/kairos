@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use crate::term::{self, Term};
 
 /// A terminal window: its X window id, console window handle or (macOS) the title it was given.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Window(String);
 
 pub struct Pane {
@@ -169,8 +169,9 @@ pub fn own(title: &str) -> Result<Window> {
 pub fn own(_title: &str) -> Result<Window> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, IsWindowVisible, GA_ROOTOWNER};
     let mut hwnd = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
-    // Under Windows Terminal the console's window is a hidden one owned by the terminal's real window.
-    if !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) } == 0 {
+    // Under Windows Terminal the console's window is a stand-in (it even says it's shown) owned by the terminal's real
+    // window. A console of its own has no owner, so this keeps it.
+    if !hwnd.is_null() {
         hwnd = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
     }
     // Started from a CI runner's shell, the lab has no console of its own and the runner's is the window in front.

@@ -223,6 +223,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     let launch_b = (h.prepare)(&p.home, &second, &url, &version)?;
     let main = pane::own(&format!("lab-main-{}", std::process::id()))?;
     let mut pane = Pane::open(&p.run, &away)?;
+    anyhow::ensure!(pane.window != main, "the second window opened as a tab of the first, {:?}", main);
     // It opens in front, and the person goes back to their own window to start.
     sleep(Duration::from_secs(1));
     pane::raise(&main)?;
