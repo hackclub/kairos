@@ -194,6 +194,16 @@ fn front(all: &[Value], shown: &[Shown]) -> Vec<String> {
     problems
 }
 
+/// kairosd for the run, stopped however the run ends: one left running holds the socket the next run's needs.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     if !args.window {
         bail!("the two scenario switches windows, so it needs --window");
@@ -214,7 +224,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
 
     let person = Person::new(true)?;
     crate::term::drain_stdin();
-    let mut daemon = daemon(args, &p)?;
+    let daemon = Daemon(daemon(args, &p)?);
     sleep(Duration::from_secs(2));
     let launch = (h.prepare)(&p.home, &p.project, &url, &version)?;
     let launch_b = (h.prepare)(&p.home, &second, &url, &version)?;
@@ -258,10 +268,10 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     if !launch.after.is_empty() {
         let _ = std::process::Command::new(&bin).args(&launch.after).current_dir(&p.project).env("HOME", &p.home).env("USERPROFILE", &p.home).output();
     }
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    drop(daemon);
     #[cfg(unix)]
     let _ = std::process::Command::new("pkill").arg("-f").arg(&p.run).status();
+    let _ = std::env::set_current_dir(&root);
     let _ = fs::remove_dir_all(&away);
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
     fs::write(p.run.join("requests.jsonl"), requests)?;

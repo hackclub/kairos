@@ -148,14 +148,16 @@ pub fn serve(port: &str, away: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// The window this process runs in. On macOS it is told apart by a title this sets.
+/// The window this process runs in, found by a title this sets: one gnome-terminal draws every window, a new window's
+/// process can start before its window is in front, and it inherits the WINDOWID of the window that asked for it.
 #[cfg(target_os = "linux")]
-pub fn own(_title: &str) -> Result<Window> {
-    if let Ok(id) = std::env::var("WINDOWID") {
-        return Ok(Window(id));
-    }
-    let id = crate::harness::output(Command::new("xdotool").arg("getactivewindow"))?;
-    Ok(Window(id))
+pub fn own(title: &str) -> Result<Window> {
+    let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty").context("this process has no terminal")?;
+    write!(tty, "\x1b]0;{title}\x07")?;
+    let found = Command::new("timeout").args(["10", "xdotool", "search", "--sync", "--name"]).arg(format!("^{title}$")).output()?;
+    let ids = String::from_utf8_lossy(&found.stdout);
+    let id = ids.lines().last().ok_or_else(|| anyhow!("no window took the title {title}"))?;
+    Ok(Window(id.trim().to_string()))
 }
 
 #[cfg(target_os = "macos")]
