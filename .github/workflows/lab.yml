@@ -17,7 +17,7 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: "two|codex-app"
+  ONLY: "two|codex-app|claude-desktop"
   SYSTEMS: ""
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
@@ -37,7 +37,8 @@ jobs:
           ref: lab
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
+      # The checks use the credit rule main serves today, not the one the lock file last saw.
+      - run: cargo update -p kairos-core && cargo build --release --locked
       - name: the kairosd to test
         shell: bash
         run: |

@@ -261,7 +261,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     }
     let (mine_b, mine_a): (Vec<&Value>, Vec<&Value>) =
         mine.iter().partition(|e| first_seen.get(e["session"].as_str().unwrap_or_default()).is_some_and(|&t| t >= started));
-    let saves = |second: bool| -> Vec<&Value> { all.iter().filter(|e| e["kind"] == "file_save" && (e["project"] == SECOND) == second).collect() };
+    let saves = |second: bool| -> Vec<&Value> { all.iter().filter(|e| e["kind"] == "file_save" && e["project"] == if second { SECOND } else { "proj" }).collect() };
     let mut problems = model.problems();
     problems.extend(check_session(h, Some(&version), &a, &[], &mine_a, &saves(false), &p.project, "proj")?);
     let wrong_b = check_session(h, Some(&version), &b, &[], &mine_b, &saves(true), &second, SECOND)?;

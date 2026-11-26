@@ -489,8 +489,8 @@ dependencies = [
 
 [[package]]
 name = "kairos-core"
-version = "0.1.19"
-source = "git+https://github.com/hackclub/kairos?branch=main#ccc2f42f1360bba6b4e3b5833b7ef7e0dcf3d243"
+version = "0.1.21"
+source = "git+https://github.com/hackclub/kairos?branch=main#088920197f5b08ea687ee98a5dc3925ca2a14b36"
 dependencies = [
  "anyhow",
  "base64",

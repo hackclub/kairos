@@ -162,8 +162,12 @@ pub fn own(title: &str) -> Result<Window> {
 
 #[cfg(windows)]
 pub fn own(_title: &str) -> Result<Window> {
-    let hwnd = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
-    anyhow::ensure!(!hwnd.is_null(), "this process has no console window");
+    // Started from a CI runner's shell, the lab has no console of its own and the runner's is the window in front.
+    let mut hwnd = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
+    if hwnd.is_null() {
+        hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    }
+    anyhow::ensure!(!hwnd.is_null(), "this process has no console window and no window is in front");
     Ok(Window((hwnd as usize).to_string()))
 }
 
