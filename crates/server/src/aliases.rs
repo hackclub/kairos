@@ -138,7 +138,7 @@ pub async fn refresh(tx: &impl GenericClient, user_id: i64) -> Result<bool> {
 macro_rules! canon_commits {
     () => {
         "(SELECT DISTINCT ON (COALESCE(a.canonical, c.project), c.sha) c.user_id, COALESCE(a.canonical, c.project) AS project,
-                 c.sha, c.ts, c.files, c.added, c.removed, c.device_id, c.authored_at, c.committed_at, c.via, c.changes
+                 c.sha, c.ts, c.files, c.added, c.removed, c.device_id, c.authored_at, c.committed_at, c.via, c.changes, c.not_before
           FROM commits c LEFT JOIN project_aliases a ON a.user_id = c.user_id AND a.alias = c.project
           WHERE c.user_id = $1
           ORDER BY COALESCE(a.canonical, c.project), c.sha, (c.via IS NOT DISTINCT FROM 'arrived'), c.ts)"

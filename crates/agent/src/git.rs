@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -29,6 +29,7 @@ const DIFF_EVERY: Duration = Duration::from_secs(300);
 const SWEEP: Duration = Duration::from_secs(600);
 const RETRY: Duration = Duration::from_secs(600);
 const MAX_REPOS: usize = 32;
+const RESTORE: usize = 16;
 const MAX_SAVED: usize = 128;
 const MAX_SEEN: usize = 2000;
 const MAX_COMMITS: usize = 100;
@@ -491,6 +492,36 @@ impl Git {
     }
 }
 
+fn reflog_len(gitdir: &Path) -> Option<u64> {
+    fs::metadata(gitdir.join("logs").join("HEAD")).ok().map(|m| m.len())
+}
+
+/// Shas HEAD's reflog records as made here (committed, amended, cherry-picked or reverted, not checked out or pulled) past
+/// its first `from` bytes. The reflog only grows until git rewrites it, which the caller rules out by its length.
+fn made_after(gitdir: &Path, from: u64) -> HashSet<String> {
+    let mut made = HashSet::new();
+    let mut buf = Vec::new();
+    let read = File::open(gitdir.join("logs").join("HEAD"))
+        .and_then(|mut f| f.seek(SeekFrom::Start(from)).map(|_| f))
+        .and_then(|f| f.take(MAX_OUT as u64).read_to_end(&mut buf));
+    if read.is_err() {
+        return made;
+    }
+    for line in buf.split(|&b| b == b'\n') {
+        let Some(tab) = line.iter().position(|&b| b == b'\t') else { continue };
+        let action = line[tab + 1..].split(|&b| b == b':').next().unwrap_or_default();
+        if !matches!(via_of(&String::from_utf8_lossy(action)), Via::Commit | Via::Amend | Via::CherryPick | Via::Revert) {
+            continue;
+        }
+        if let Some(sha) = line[..tab].split(|&b| b == b' ').nth(1).map(|s| String::from_utf8_lossy(s).into_owned()) {
+            if is_sha(&sha) {
+                made.insert(sha);
+            }
+        }
+    }
+    made
+}
+
 fn untracked_file(root: &Path, raw: &[u8], budget: &mut u64, tally: &mut Tally) {
     let Some(rel) = relative(raw) else { return };
     let full = root.join(&rel);
@@ -540,6 +571,11 @@ struct Mark {
     head: Option<String>,
     since: f64,
     touched: f64,
+    /// When HEAD was last read and how long its reflog was then: a commit the reflog records past that length was made after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked: Option<(f64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -579,6 +615,7 @@ struct Engine {
     next_sweep: Instant,
     unwatch: Vec<PathBuf>,
     warned_cap: bool,
+    dirty: bool,
 }
 
 fn key(root: &Path) -> String {
@@ -600,6 +637,7 @@ impl Engine {
             next_sweep: Instant::now() + SWEEP,
             unwatch: Vec::new(),
             warned_cap: false,
+            dirty: false,
         }
     }
 
@@ -623,7 +661,8 @@ impl Engine {
             return Vec::new();
         }
         if let Some(repo) = self.repos.get_mut(&root) {
-            repo.id = id;
+            repo.id = id.clone();
+            self.remember(&root, id);
             return Vec::new();
         }
         // Git may get installed while kairosd runs. Not on macOS, where each try can bring the install dialog back.
@@ -667,8 +706,9 @@ impl Engine {
         };
         let fresh = !self.saved.repos.contains_key(&key(&root));
         if fresh {
+            let checked = reflog_len(&dirs.gitdir).map(|n| (now_secs, n));
             let head = self.git.head(&root).ok().flatten();
-            self.saved.repos.insert(key(&root), Mark { head, since: now_secs, touched: now_secs });
+            self.saved.repos.insert(key(&root), Mark { head, since: now_secs, touched: now_secs, checked, id: Some(id.clone()) });
             while self.saved.repos.len() > MAX_SAVED {
                 let oldest = self.saved.repos.iter().min_by(|a, b| a.1.touched.total_cmp(&b.1.touched)).map(|(k, _)| k.clone());
                 match oldest {
@@ -677,6 +717,8 @@ impl Engine {
                 };
             }
             self.save();
+        } else {
+            self.remember(&root, id.clone());
         }
         let watch = vec![
             (dirs.gitdir.clone(), RecursiveMode::NonRecursive),
@@ -697,6 +739,27 @@ impl Engine {
             },
         );
         watch
+    }
+
+    fn remember(&mut self, root: &Path, id: String) {
+        if let Some(m) = self.saved.repos.get_mut(&key(root)).filter(|m| m.id.as_deref() != Some(id.as_str())) {
+            m.id = Some(id);
+            self.dirty = true;
+        }
+    }
+
+    /// Each update restarts kairosd. Repos followed in the last two days are watched again right away, not once their project
+    /// shows activity, so a commit is seen when it lands.
+    fn restore(&mut self, now: Instant, now_secs: f64) -> Vec<(PathBuf, RecursiveMode)> {
+        let mut recent: Vec<(f64, String, String)> = self
+            .saved
+            .repos
+            .iter()
+            .filter_map(|(root, m)| Some((m.checked.map_or(m.touched, |c| c.0), root.clone(), m.id.clone()?)))
+            .filter(|(last, ..)| now_secs - last <= MAX_AGE)
+            .collect();
+        recent.sort_by(|a, b| b.0.total_cmp(&a.0));
+        recent.into_iter().take(RESTORE).flat_map(|(_, root, id)| self.register(PathBuf::from(root), id, now, now_secs)).collect()
     }
 
     fn activity(&mut self, root: &Path) {
@@ -768,6 +831,9 @@ impl Engine {
                 out.extend(self.sample(&root, now, now_secs));
             }
         }
+        if std::mem::take(&mut self.dirty) {
+            self.save();
+        }
         out
     }
 
@@ -779,6 +845,9 @@ impl Engine {
         let Some(repo) = self.repos.get_mut(root) else { return out };
         repo.check_at = None;
         let id = repo.id.clone();
+        let gitdir = repo.gitdir.clone();
+        // Read before HEAD: a commit landing in between is then past this length and is placed after this look.
+        let checked = reflog_len(&gitdir).map(|n| (now_secs, n));
         let head = match self.git.head(root) {
             Ok(Some(h)) => h,
             Err(Fail::Gone) => {
@@ -789,8 +858,16 @@ impl Engine {
         };
         let Some(mark) = self.saved.repos.get(&key(root)).cloned() else { return out };
         if mark.head.as_deref() == Some(head.as_str()) {
+            if let Some(m) = self.saved.repos.get_mut(&key(root)) {
+                m.checked = checked;
+                self.dirty = true;
+            }
             return out;
         }
+        let made = match (mark.checked, checked) {
+            (Some((_, from)), Some((_, len))) if len >= from => made_after(&gitdir, from),
+            _ => HashSet::new(),
+        };
         let from = mark.head.as_deref().filter(|h| is_sha(h));
         // The old watermark can vanish (reset, gc, a rewritten history): fall back to HEAD's recent commits.
         let listed = match self.git.commits(root, from, &head) {
@@ -818,6 +895,7 @@ impl Engine {
             let reflog = reflog.get_or_insert_with(|| self.git.reflog(root));
             let via = reflog.as_ref().map(|r| r.via.get(&rec.sha).copied().unwrap_or(Via::Arrived));
             let replaces = reflog.as_ref().filter(|_| via == Some(Via::Amend)).and_then(|r| r.replaces.get(&rec.sha).cloned());
+            let not_before = mark.checked.filter(|_| made.contains(&rec.sha)).map(|(t, _)| t);
             match self.git.commit_size(root, &rec.sha) {
                 Ok(stat) => {
                     let kind = Kind::Commit {
@@ -830,6 +908,7 @@ impl Engine {
                         via,
                         changes: stat.changes,
                         replaces,
+                        not_before,
                     };
                     out.push(Event::new(now_secs, Some(id.clone()), kind));
                 }
@@ -840,6 +919,7 @@ impl Engine {
         if let Some(m) = self.saved.repos.get_mut(&key(root)) {
             m.head = Some(head);
             m.touched = now_secs;
+            m.checked = checked;
         }
         self.save();
         if let Some(repo) = self.repos.get_mut(root) {
@@ -943,15 +1023,17 @@ pub fn spawn(rx: Receiver<Cmd>, tx_self: Sender<Cmd>, out: Sender<Msg>, dir: Pat
         if watcher.is_none() {
             diag!("kairosd: warning: git watcher unavailable, commits are noticed by a 10 minute sweep");
         }
+        let watch = |paths: Vec<(PathBuf, RecursiveMode)>, watcher: &mut Option<notify::RecommendedWatcher>| {
+            for (path, mode) in paths {
+                if let Some(w) = watcher.as_mut() {
+                    let _ = w.watch(&path, mode);
+                }
+            }
+        };
+        watch(engine.restore(Instant::now(), now()), &mut watcher);
         loop {
             match rx.recv_timeout(TICK) {
-                Ok(Cmd::Root(root, id)) => {
-                    for (path, mode) in engine.register(plain(root), id, Instant::now(), now()) {
-                        if let Some(w) = watcher.as_mut() {
-                            let _ = w.watch(&path, mode);
-                        }
-                    }
-                }
+                Ok(Cmd::Root(root, id)) => watch(engine.register(plain(root), id, Instant::now(), now()), &mut watcher),
                 Ok(Cmd::Activity(root)) => engine.activity(&plain(root)),
                 Ok(Cmd::Fs(paths)) => engine.touched(&paths, Instant::now()),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -1274,6 +1356,91 @@ mod tests {
         let mut e = engine(&f.dir);
         let t = add(&mut e, &root);
         assert_eq!(commits(&e.tick(t, now())), [(sha, 1, 1, 0)]);
+    }
+
+    fn spans(events: &[Event]) -> Vec<(String, Option<f64>)> {
+        events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                Kind::Commit { sha, not_before, .. } => Some((sha.clone(), *not_before)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_made_here_carries_when_head_was_last_read_before_it() {
+        let f = fixture("span");
+        let root = repo(&f.dir, "r");
+        commit(&root, "a.txt", "1\n");
+        let mut e = engine(&f.dir);
+        add(&mut e, &root);
+        let looked = now();
+        assert!(e.check(&root, looked).is_empty());
+        let sha = commit(&root, "a.txt", "1\n2\n");
+        assert_eq!(spans(&e.check(&root, looked + 5.0)), [(sha, Some(looked))]);
+        let sha = commit(&root, "a.txt", "1\n2\n3\n");
+        assert_eq!(spans(&e.check(&root, looked + 9.0)), [(sha, Some(looked + 5.0))]);
+    }
+
+    #[test]
+    fn a_commit_made_before_the_last_look_and_checked_out_after_has_no_span() {
+        let f = fixture("branch");
+        let root = repo(&f.dir, "r");
+        commit(&root, "a.txt", "1\n");
+        let mut e = engine(&f.dir);
+        add(&mut e, &root);
+        git(&root, &["checkout", "-q", "-b", "feature"]);
+        let made = commit(&root, "f.txt", "f\n");
+        git(&root, &["checkout", "-q", "main"]);
+        assert!(check(&mut e, &root).is_empty());
+        git(&root, &["checkout", "-q", "feature"]);
+        assert_eq!(spans(&check(&mut e, &root)), [(made, None)]);
+    }
+
+    #[test]
+    fn a_restart_watches_recent_repos_again_and_keeps_their_span() {
+        let f = fixture("restore");
+        let root = repo(&f.dir, "r");
+        commit(&root, "a.txt", "1\n");
+        let mut e = engine(&f.dir);
+        let t = add(&mut e, &root);
+        let looked = now();
+        e.touched(&[root.join(".git/HEAD")], t);
+        assert!(e.tick(t + DEBOUNCE, looked).is_empty());
+        drop(e);
+        let sha = commit(&root, "a.txt", "1\n2\n");
+        let mut e = engine(&f.dir);
+        let t = Instant::now();
+        assert!(!e.restore(t, now()).is_empty(), "watched without waiting for activity");
+        let events = e.tick(t, now());
+        assert_eq!(spans(&events), [(sha, Some(looked))]);
+        assert_eq!(events[0].project.as_deref(), Some("o/r"));
+
+        let mut e = engine(&f.dir);
+        assert!(e.restore(Instant::now(), now() + MAX_AGE + 60.0).is_empty(), "a repo idle for two days waits for activity");
+    }
+
+    #[test]
+    fn state_from_an_older_kairosd_or_a_rewritten_reflog_gives_no_span() {
+        let f = fixture("legacy");
+        let root = repo(&f.dir, "r");
+        let head = commit(&root, "a.txt", "1\n");
+        let t = now();
+        let mut repos = serde_json::Map::new();
+        repos.insert(key(&root), serde_json::json!({ "head": head, "since": t, "touched": t }));
+        let old = serde_json::json!({ "repos": repos, "seen": [] });
+        fs::write(f.dir.join("state.json"), old.to_string()).unwrap();
+        let sha = commit(&root, "a.txt", "1\n2\n");
+        let mut e = engine(&f.dir);
+        assert!(e.restore(Instant::now(), now()).is_empty(), "no project id saved");
+        add(&mut e, &root);
+        assert_eq!(spans(&check(&mut e, &root)), [(sha, None)]);
+
+        assert!(check(&mut e, &root).is_empty());
+        fs::write(root.join(".git/logs/HEAD"), "").unwrap();
+        let sha = commit(&root, "a.txt", "1\n2\n3\n");
+        assert_eq!(spans(&check(&mut e, &root)), [(sha, None)]);
     }
 
     #[test]

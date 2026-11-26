@@ -121,7 +121,7 @@ async fn ingest_stores_the_device_dates_via_and_changes() {
         t,
         &sha('a'),
         json!({
-            "authored": D as i64, "committed": D as i64 + 60, "via": "amend",
+            "authored": D as i64, "committed": D as i64 + 60, "via": "amend", "not_before": t - 600.0,
             "changes": [{ "path": "src/main.rs", "added": 10, "removed": 2 }, { "path": "README.md", "added": 0, "removed": 0 }],
         }),
     );
@@ -131,7 +131,7 @@ async fn ingest_stores_the_device_dates_via_and_changes() {
         t + 1.0,
         &sha('b'),
         json!({
-            "authored": future as i64, "committed": 1.5, "via": "bogus",
+            "authored": future as i64, "committed": 1.5, "via": "bogus", "not_before": t + 2.0,
             "changes": [
                 { "path": "a\u{7}b\u{1b}.rs\n", "added": 4_294_967_295u64, "removed": 1 },
                 { "path": "", "added": 1, "removed": 1 },
@@ -147,7 +147,7 @@ async fn ingest_stores_the_device_dates_via_and_changes() {
             ],
         }),
     );
-    raw_commit(&mut events, t + 2.0, &sha('c'), json!({ "authored": "yesterday", "committed": 0, "via": 7, "changes": "everything" }));
+    raw_commit(&mut events, t + 2.0, &sha('c'), json!({ "authored": "yesterday", "committed": 0, "via": 7, "changes": "everything", "not_before": "earlier" }));
     let many: Vec<Value> = (0..MAX_CHANGES + 5).map(|i| json!({ "path": format!("f{i}.rs"), "added": i, "removed": 0 })).collect();
     raw_commit(&mut events, t + 3.0, &sha('d'), json!({ "via": "unknown", "committed": D as i64, "changes": many }));
     raw_commit(&mut events, t + 4.0, &sha('e'), json!({ "changes": [{ "path": "", "added": 1, "removed": 1 }] }));
@@ -187,6 +187,16 @@ async fn ingest_stores_the_device_dates_via_and_changes() {
     assert_eq!(row(&rows, 'e').5, None, "no valid entry means no changes");
     let f = row(&rows, 'f');
     assert_eq!((f.2, f.3, f.4.as_deref(), f.5.clone()), (None, Some(future as i64 - 2 * DAY as i64), Some("cherry_pick"), None));
+
+    let db = app.st.pool.get().await.unwrap();
+    let spans: Vec<(String, f64)> = db
+        .query("SELECT sha, not_before FROM commits WHERE user_id = $1 AND not_before IS NOT NULL", &[&uid])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(spans, [(sha('a'), t - 600.0)], "a time after the device saw the commit, or not a number, is dropped");
     app.finish().await;
 }
 
@@ -224,13 +234,13 @@ async fn the_review_page_tags_how_a_commit_arrived_and_lists_its_files() {
 
     let mut many = vec![file("src/<script>alert(1)</script>.js")];
     many.extend((0..59).map(|i| file(&format!("src/f{i}.rs"))));
-    raw_commit(&mut events, t, &sha('a'), json!({ "via": "amend", "committed": D as i64 + 3 * DAY as i64 + 13 * 3600 + 420, "files": 70, "changes": many }));
-    raw_commit(&mut events, t + 60.0, &sha('b'), json!({ "via": "commit", "committed": t as i64 + 1800 }));
-    raw_commit(&mut events, t + 120.0, &sha('c'), json!({ "via": "rebase", "committed": t as i64 + 120 - 3601 }));
-    raw_commit(&mut events, t + 180.0, &sha('d'), json!({ "via": "arrived", "committed": t as i64 - 5 * DAY as i64 }));
-    raw_commit(&mut events, t + 240.0, &sha('e'), json!({ "via": "cherry_pick", "committed": t as i64 + 240, "files": 2, "changes": [file("a.rs"), file("b.rs")] }));
-    raw_commit(&mut events, t + 300.0, &sha('f'), json!({ "via": "revert", "committed": t as i64 + 300 + 3601 }));
-    raw_commit(&mut events, t + 360.0, &sha('1'), json!({ "via": "unknown", "committed": t as i64 - 5 * DAY as i64 }));
+    raw_commit(&mut events, t, &sha('a'), json!({ "via": "amend", "committed": D as i64 + 3 * DAY as i64 + 13 * 3600 + 420, "files": 70, "changes": many, "not_before": t }));
+    raw_commit(&mut events, t + 60.0, &sha('b'), json!({ "via": "commit", "committed": t as i64 + 1800, "not_before": t + 60.0 }));
+    raw_commit(&mut events, t + 120.0, &sha('c'), json!({ "via": "rebase", "committed": t as i64 + 120 - 3601, "not_before": t + 120.0 }));
+    raw_commit(&mut events, t + 180.0, &sha('d'), json!({ "via": "arrived", "committed": t as i64 - 5 * DAY as i64, "not_before": t + 180.0 }));
+    raw_commit(&mut events, t + 240.0, &sha('e'), json!({ "via": "cherry_pick", "committed": t as i64 + 240, "files": 2, "changes": [file("a.rs"), file("b.rs")], "not_before": t + 240.0 }));
+    raw_commit(&mut events, t + 300.0, &sha('f'), json!({ "via": "revert", "committed": t as i64 + 300 + 3601, "not_before": t + 300.0 }));
+    raw_commit(&mut events, t + 360.0, &sha('1'), json!({ "via": "unknown", "committed": t as i64 - 5 * DAY as i64, "not_before": t + 360.0 }));
     raw_commit(&mut events, t + 420.0, &sha('2'), json!({}));
     assert_eq!(upload(&app, &token, events).await.status, StatusCode::OK);
 
@@ -260,7 +270,7 @@ async fn the_review_page_tags_how_a_commit_arrived_and_lists_its_files() {
 }
 
 #[tokio::test]
-async fn the_commit_dates_signal_needs_a_local_commit_dated_away_while_recording() {
+async fn the_commit_dates_signal_needs_a_local_commit_dated_outside_when_it_was_made() {
     let app = TestApp::new().await;
     let mut ada = person(&app, "Ada", "user").await;
     let laptop = ada.pair("ada-laptop").await;
@@ -269,7 +279,7 @@ async fn the_commit_dates_signal_needs_a_local_commit_dated_away_while_recording
     let mut events = c.take();
     let t = D + 10.0 * H;
     let at = |mins: f64| t + mins * 60.0;
-    let dated = |mins: f64, via: &str, off: i64| json!({ "via": via, "committed": at(mins) as i64 + off });
+    let dated = |mins: f64, via: &str, off: i64| json!({ "via": via, "committed": at(mins) as i64 + off, "not_before": at(mins) - 30.0 });
 
     raw_commit(&mut events, at(5.0), &sha('a'), dated(5.0, "commit", -2 * 3600));
     raw_commit(&mut events, at(6.0), &sha('b'), dated(6.0, "amend", 660));
@@ -277,32 +287,36 @@ async fn the_commit_dates_signal_needs_a_local_commit_dated_away_while_recording
     raw_commit(&mut events, at(7.5), &sha('1'), dated(7.5, "commit", 540));
     raw_commit(&mut events, at(8.0), &sha('d'), dated(8.0, "arrived", -5 * 86_400));
     raw_commit(&mut events, at(9.0), &sha('e'), dated(9.0, "rebase", -5 * 86_400));
-    raw_commit(&mut events, at(10.0), &sha('2'), json!({ "committed": at(10.0) as i64 - 5 * 86_400 }));
-    raw_commit(&mut events, at(11.0), &sha('4'), json!({ "via": "commit", "committed": at(11.0) as i64, "authored": at(11.0) as i64 - 3 * 3600 }));
-    raw_commit(&mut events, at(12.0), &sha('5'), json!({ "via": "amend", "committed": at(12.0) as i64, "authored": at(12.0) as i64 - 3 * 3600 }));
-    raw_commit(&mut events, at(45.0), &sha('f'), dated(45.0, "commit", -5 * 86_400));
+    raw_commit(&mut events, at(10.0), &sha('2'), json!({ "committed": at(10.0) as i64 - 5 * 86_400, "not_before": at(9.5) }));
+    raw_commit(&mut events, at(11.0), &sha('4'), json!({ "via": "commit", "committed": at(11.0) as i64, "authored": at(11.0) as i64 - 3 * 3600, "not_before": at(10.5) }));
+    raw_commit(&mut events, at(12.0), &sha('5'), json!({ "via": "amend", "committed": at(12.0) as i64, "authored": at(12.0) as i64 - 3 * 3600, "not_before": at(11.5) }));
+    // Found when kairosd came back: made hours before it was seen, but after the device last looked.
+    raw_commit(&mut events, at(45.0), &sha('f'), json!({ "via": "commit", "committed": at(45.0) as i64 - 5 * 3600, "not_before": at(45.0) - 7.0 * H }));
+    raw_commit(&mut events, at(50.0), &sha('6'), json!({ "via": "commit", "committed": at(50.0) as i64 - 4 * 3600, "not_before": at(50.0) - 2.0 * H }));
+    raw_commit(&mut events, at(55.0), &sha('7'), json!({ "via": "commit", "committed": at(55.0) as i64 - 5 * 86_400 }));
+    raw_commit(&mut events, at(58.0), &sha('8'), json!({ "via": "commit", "committed": D as i64 - 5 * 3600, "not_before": D - 2.0 * H }));
     assert_eq!(upload(&app, &laptop, events).await.status, StatusCode::OK);
-
-    let desktop = ada.pair("ada-desktop").await;
-    let mut events = Chain::default();
-    events.push(D + 12.0 * H, None, Kind::Focus { class: Class::Editor, app: None });
-    let mut events = events.take();
-    raw_commit(&mut events, D + 12.0 * H + 5.0, &sha('3'), json!({ "via": "commit", "committed": D as i64 - 5 * 86_400 }));
-    assert_eq!(upload(&app, &desktop, events).await.status, StatusCode::OK);
 
     let mut rev = person(&app, "Rev", "reviewer").await;
     let page = rev.get("/review/@ada?from=2026-06-01&to=2026-06-01").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     let signal = page.body.split("id=\"sig-commit_dates\"").nth(1).expect("the signal is shown").split("</ul>").next().unwrap();
     assert!(signal.contains("notice"), "{signal}");
-    assert!(signal.contains("aaaaaaa in ada/site, seen 10:05, git date Jun 1, 2026 08:05"), "{signal}");
-    assert!(signal.contains("bbbbbbb in ada/site, seen 10:06, git date Jun 1, 2026 10:17"), "{signal}");
+    assert!(signal.contains("aaaaaaa in ada/site, not there at 10:04, seen 10:05, git date Jun 1, 2026 08:05"), "{signal}");
+    assert!(signal.contains("bbbbbbb in ada/site, not there at 10:05, seen 10:06, git date Jun 1, 2026 10:17"), "{signal}");
     assert!(signal.contains("href=\"#d-2026-06-01\""));
-    assert!(signal.contains("4444444 in ada/site, seen 10:11, git date Jun 1, 2026 07:11"), "--date moves only the author date: {signal}");
-    assert_eq!(signal.matches("<li>").count(), 3, "{signal}");
-    for quiet in ["ccccccc", "1111111", "ddddddd", "eeeeeee", "2222222", "fffffff", "3333333", "5555555"] {
+    assert!(signal.contains("4444444 in ada/site, not there at 10:10, seen 10:11, git date Jun 1, 2026 07:11"), "--date moves only the author date: {signal}");
+    assert!(signal.contains("6666666 in ada/site, not there at 08:50, seen 10:50, git date Jun 1, 2026 06:50"), "{signal}");
+    assert!(signal.contains("8888888 in ada/site, not there at May 31 22:00, seen 10:58, git date May 31, 2026 19:00"), "{signal}");
+    assert_eq!(signal.matches("<li>").count(), 5, "{signal}");
+    for quiet in ["ccccccc", "1111111", "ddddddd", "eeeeeee", "2222222", "5555555", "fffffff", "7777777"] {
         assert!(!signal.contains(quiet), "{quiet} should not count: {signal}");
     }
+
+    let section = page.body.split("<section id=\"commits\">").nth(1).unwrap().split("</section>").next().unwrap();
+    assert!(item(section, '6').contains("git date "), "{section}");
+    assert!(!item(section, 'f').contains("git date "), "made in its span, however late it was seen: {section}");
+    assert!(!item(section, '7').contains("git date "), "no span, nothing to compare: {section}");
     app.finish().await;
 }
 
@@ -357,7 +371,7 @@ fn edit(chain: &mut Chain, ts: f64, project: &str, harness: &str, path: &str, ad
 fn commit(chain: &mut Chain, ts: f64, c: char, via: Via, changes: &[(&str, u32, u32)]) {
     let changes: Vec<FileChange> = changes.iter().map(|&(p, a, r)| FileChange { path: p.into(), added: a, removed: r }).collect();
     let (added, removed) = changes.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-    let kind = Kind::Commit { sha: sha(c), files: changes.len() as u32, added, removed, authored: None, committed: Some(ts as i64), via: Some(via), changes, replaces: None };
+    let kind = Kind::Commit { sha: sha(c), files: changes.len() as u32, added, removed, authored: None, committed: Some(ts as i64), via: Some(via), changes, replaces: None, not_before: None };
     chain.push(ts, Some("ada/site"), kind);
 }
 

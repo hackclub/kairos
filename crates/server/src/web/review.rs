@@ -387,7 +387,7 @@ async fn extras(st: &St, user_id: i64, tz: Tz, f: &Filter) -> Res<Extras> {
             c.query(
                 concat!(
                     "SELECT c.ts, c.project, c.sha, c.files, c.added, c.removed, p.repo_url, c.via, c.committed_at,
-                            c.changes, c.authored_at, c.device_id FROM ",
+                            c.changes, c.authored_at, c.device_id, c.not_before FROM ",
                     canon_commits!(),
                     " c LEFT JOIN projects p ON p.user_id = c.user_id AND p.id = c.project
                      WHERE c.ts >= $2 AND c.ts < $3 AND ($4::text[] IS NULL OR c.project = ANY($4))
@@ -444,7 +444,7 @@ async fn extras(st: &St, user_id: i64, tz: Tz, f: &Filter) -> Res<Extras> {
         let (ts, sha, repo): (f64, String, Option<String>) = (r.get(0), r.get(2), r.get(6));
         let github = repo.filter(|u| u.starts_with("https://github.com/"));
         let via: Option<String> = r.get(7);
-        let dated = git_date_off(ts, via.as_deref(), r.get(10), r.get(8), GIT_DATE_HINT, GIT_DATE_HINT);
+        let dated = git_date_off(r.get(12), ts, via.as_deref(), r.get(10), r.get(8), GIT_DATE_HINT, GIT_DATE_HINT);
         rows.push(CommitRow {
             ts,
             when: at(tz, ts, "%a %b %-d %H:%M"),

@@ -79,7 +79,7 @@ pub fn commit(tape: &mut Tape, rng: &mut Rng, project: &str, ts: f64) {
     tape.at(
         ts,
         Some(project),
-        Kind::Commit { sha, files: rng.int(1, 8) as u32, added: rng.int(3, 200) as u32, removed: rng.int(0, 80) as u32, authored: None, committed: None, via: None, changes: vec![], replaces: None },
+        Kind::Commit { sha, files: rng.int(1, 8) as u32, added: rng.int(3, 200) as u32, removed: rng.int(0, 80) as u32, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None },
     );
 }
 

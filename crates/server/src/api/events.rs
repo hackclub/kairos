@@ -193,11 +193,12 @@ pub async fn upload(State(st): State<St>, h: HeaderMap, Json(up): Json<Upload>) 
         let num = |k: &str| v.get(k).and_then(Value::as_u64).map_or(0, |x| x.min(i32::MAX as u64) as i32);
         let via = v.get("via").and_then(Value::as_str).filter(|x| VIA.contains(x));
         tx.execute(
-            "INSERT INTO commits (user_id, project, sha, ts, files, added, removed, device_id, authored_at, committed_at, via, changes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "INSERT INTO commits (user_id, project, sha, ts, files, added, removed, device_id, authored_at, committed_at, via, changes, not_before)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (user_id, project, sha) DO UPDATE SET ts = EXCLUDED.ts, files = EXCLUDED.files, added = EXCLUDED.added,
                 removed = EXCLUDED.removed, device_id = EXCLUDED.device_id, authored_at = EXCLUDED.authored_at,
-                committed_at = EXCLUDED.committed_at, via = EXCLUDED.via, changes = EXCLUDED.changes, received_at = now()
+                committed_at = EXCLUDED.committed_at, via = EXCLUDED.via, changes = EXCLUDED.changes, not_before = EXCLUDED.not_before,
+                received_at = now()
              WHERE commits.via = 'arrived' AND EXCLUDED.via IS NOT NULL AND EXCLUDED.via <> 'arrived'",
             &[
                 &dev.user_id,
@@ -212,6 +213,7 @@ pub async fn upload(State(st): State<St>, h: HeaderMap, Json(up): Json<Upload>) 
                 &git_date(v, "committed", date_limit),
                 &via,
                 &clean_changes(v),
+                &v.get("not_before").and_then(Value::as_f64).filter(|t| *t > 0.0 && *t <= r.ts),
             ],
         )
         .await?;

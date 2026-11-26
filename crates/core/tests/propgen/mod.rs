@@ -409,7 +409,7 @@ impl Gen<'_> {
                 let ts = self.t;
                 let project = self.rng.pick(&PROJECTS);
                 let kind = match self.rng.below(5) {
-                    0 => Kind::Commit { sha: "abcdef1".into(), files: 1, added: 3, removed: 1, authored: None, committed: None, via: Some(Via::Commit), changes: vec![], replaces: None },
+                    0 => Kind::Commit { sha: "abcdef1".into(), files: 1, added: 3, removed: 1, authored: None, committed: None, via: Some(Via::Commit), changes: vec![], replaces: None, not_before: None },
                     1 => Kind::Diff { files: 2, added: 4, removed: 4, changes: vec![] },
                     2 => Kind::AgentCommit { session: "s1".into(), sha: None },
                     3 => Kind::ProjectAlias { from: "old/name".into() },

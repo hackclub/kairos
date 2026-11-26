@@ -22,7 +22,7 @@ fn strict(r: &Resp) {
 }
 
 fn commit(sha: &str, files: u32, added: u32, removed: u32) -> Kind {
-    Kind::Commit { sha: sha.into(), files, added, removed, authored: None, committed: None, via: None, changes: vec![], replaces: None }
+    Kind::Commit { sha: sha.into(), files, added, removed, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None }
 }
 
 async fn project_user(app: &TestApp, b: &mut Browser<'_>) -> (String, i64) {

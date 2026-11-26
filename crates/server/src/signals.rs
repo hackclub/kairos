@@ -19,10 +19,6 @@ pub const LATE_UPLOAD: f64 = 48.0 * 3600.0;
 pub const NO_OUTPUT: f64 = 5.0 * 3600.0;
 pub const DATED_BEHIND: f64 = 3600.0;
 pub const DATED_AHEAD: f64 = 600.0;
-// The device must have an event this far before the commit to count as already recording, and not
-// closer than the grace: a daemon that just started finds older commits within its first seconds.
-const RECORDING_WINDOW: f64 = 900.0;
-const RECORDING_GRACE: f64 = 120.0;
 /// `present` fires once a minute while there is input; each one stands for the minute before it.
 pub const PRESENT_EVERY: f64 = 60.0;
 const PRESENT_GAP: f64 = 90.0;
@@ -94,6 +90,7 @@ pub struct LateBatch {
 pub struct DatedCommit {
     pub project: String,
     pub sha: String,
+    pub not_before: f64,
     pub seen: f64,
     pub dated: i64,
 }
@@ -390,10 +387,13 @@ fn no_output(i: &Inputs) -> Option<Signal> {
     )
 }
 
+/// A git date off the span the device shows the commit was made in, from `not_before` to `seen`. Without `not_before`
+/// (pulled, an older kairosd, a reflog it lost track of) nothing shows when it was made, so no date is off.
 /// The committer date counts, and for a plain commit or revert the author date too (`--date` sets only that one).
 /// An amend or cherry-pick keeps the original author date, so only its committer date counts.
-pub fn git_date_off(seen: f64, via: Option<&str>, authored: Option<i64>, committed: Option<i64>, behind: f64, ahead: f64) -> Option<i64> {
-    let off = |t: i64| (t as f64) < seen - behind || (t as f64) > seen + ahead;
+pub fn git_date_off(not_before: Option<f64>, seen: f64, via: Option<&str>, authored: Option<i64>, committed: Option<i64>, behind: f64, ahead: f64) -> Option<i64> {
+    let from = not_before?;
+    let off = |t: i64| (t as f64) < from - behind || (t as f64) > seen + ahead;
     committed.filter(|t| off(*t)).or_else(|| authored.filter(|t| matches!(via, Some("commit" | "revert")) && off(*t)))
 }
 
@@ -405,14 +405,20 @@ fn commit_dates(i: &Inputs) -> Option<Signal> {
         .map(|c| {
             let git = DateTime::from_timestamp(c.dated, 0).map_or_else(String::new, |d| d.with_timezone(&i.tz).format("%b %-d, %Y %H:%M").to_string());
             let short: String = c.sha.chars().take(7).collect();
-            Evidence { day: Some(local_day(i.tz, c.seen)), text: format!("{short} in {}, seen {}, git date {git}", c.project, clock(i.tz, c.seen)) }
+            let day = local_day(i.tz, c.seen);
+            let from = match local_day(i.tz, c.not_before) {
+                d if d == day => clock(i.tz, c.not_before),
+                d => format!("{} {}", d.format("%b %-d"), clock(i.tz, c.not_before)),
+            };
+            let text = format!("{short} in {}, not there at {from}, seen {}, git date {git}", c.project, clock(i.tz, c.seen));
+            Evidence { day: Some(day), text }
         })
         .collect();
     signal(
         "commit_dates",
         Level::Notice,
         "Commit dates that don't match when they were made",
-        "A commit made on a device has a git date (committer, or author for a plain commit) more than an hour before, or more than 10 minutes after, the moment the device saw it appear while it was recording. Whoever makes a commit can set its date, so the review goes by when the device saw it.",
+        "A commit made on a device has a git date (committer, or author for a plain commit) more than an hour before the device last looked and it wasn't there yet, or more than 10 minutes after the device saw it. Whoever makes a commit can set its date, so the review goes by what the device saw.",
         evidence,
     )
 }
@@ -449,16 +455,14 @@ const SAVES: &str = "
 
 const COMMITS: &str = concat!("SELECT project, count(*) FROM ", canon_commits!(), " c WHERE ts >= $2 AND ts < $3 GROUP BY project");
 
-// Commits made on a device (not pulled or rebased) while it was already recording: it has an event in the minutes before.
-// `git_date_off` has the last word on which date counts.
+// Commits made on a device (not pulled or rebased). `git_date_off` has the last word on which date counts.
 const DATED: &str = concat!("
-    SELECT c.project, c.sha, c.ts, c.via, c.authored_at, c.committed_at FROM ", canon_commits!(), " c
+    SELECT c.project, c.sha, c.ts, c.via, c.authored_at, c.committed_at, c.not_before FROM ", canon_commits!(), " c
     WHERE c.ts >= $2 AND c.ts < $3 AND c.via IN ('commit', 'amend', 'cherry_pick', 'revert')
-      AND c.device_id IS NOT NULL
-      AND (c.committed_at < c.ts - $4 OR c.committed_at > c.ts + $5
-           OR (c.via IN ('commit', 'revert') AND (c.authored_at < c.ts - $4 OR c.authored_at > c.ts + $5)))
-      AND EXISTS (SELECT 1 FROM events e WHERE e.device_id = c.device_id AND e.ts >= c.ts - $6 AND e.ts <= c.ts - $7)
-    ORDER BY c.ts, c.sha LIMIT $8");
+      AND c.device_id IS NOT NULL AND c.not_before IS NOT NULL
+      AND (c.committed_at < c.not_before - $4 OR c.committed_at > c.ts + $5
+           OR (c.via IN ('commit', 'revert') AND (c.authored_at < c.not_before - $4 OR c.authored_at > c.ts + $5)))
+    ORDER BY c.ts, c.sha LIMIT $6");
 
 pub async fn load(st: &St, user_id: i64, devices: &[i64], (start, end): (f64, f64)) -> Res<Facts> {
     let c = st.pool.get().await?;
@@ -469,7 +473,7 @@ pub async fn load(st: &St, user_id: i64, devices: &[i64], (start, end): (f64, f6
         async { c.query(SAVES, &[&devices, &start, &end, &user_id]).await },
         async { c.query(COMMITS, &[&user_id, &start, &end]).await },
         async {
-            c.query(DATED, &[&user_id, &start, &end, &DATED_BEHIND, &DATED_AHEAD, &RECORDING_WINDOW, &RECORDING_GRACE, &MAX_ROWS]).await
+            c.query(DATED, &[&user_id, &start, &end, &DATED_BEHIND, &DATED_AHEAD, &MAX_ROWS]).await
         },
     )?;
     Ok(Facts {
@@ -484,9 +488,9 @@ pub async fn load(st: &St, user_id: i64, devices: &[i64], (start, end): (f64, f6
         dated: dated
             .iter()
             .filter_map(|r| {
-                let seen: f64 = r.get(2);
-                let dated = git_date_off(seen, r.get(3), r.get(4), r.get(5), DATED_BEHIND, DATED_AHEAD)?;
-                Some(DatedCommit { project: r.get(0), sha: r.get(1), seen, dated })
+                let (seen, not_before): (f64, f64) = (r.get(2), r.get(6));
+                let dated = git_date_off(Some(not_before), seen, r.get(3), r.get(4), r.get(5), DATED_BEHIND, DATED_AHEAD)?;
+                Some(DatedCommit { project: r.get(0), sha: r.get(1), not_before, seen, dated })
             })
             .collect(),
     })

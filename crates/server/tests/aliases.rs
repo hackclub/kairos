@@ -11,7 +11,7 @@ const SHA_A: &str = "abc1234def5678abc1234def5678abc1234def56";
 const SHA_B: &str = "bbbbbbb1111111111111111111111111111111aa";
 
 fn commit(sha: &str, via: Option<Via>) -> Kind {
-    Kind::Commit { sha: sha.into(), files: 2, added: 5, removed: 1, authored: None, committed: None, via, changes: vec![], replaces: None }
+    Kind::Commit { sha: sha.into(), files: 2, added: 5, removed: 1, authored: None, committed: None, via, changes: vec![], replaces: None, not_before: None }
 }
 
 fn alias(from: &str) -> Kind {

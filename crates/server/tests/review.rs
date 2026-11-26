@@ -37,7 +37,7 @@ async fn seed(app: &TestApp) -> Browser<'_> {
     let mut c = Chain::default();
     c.push(local(0.0, 9.0, 0.0), None, Kind::Backends { focus: "x11".into(), idle: "xprintidle".into() });
     c.editing("ada/site", local(0.0, 10.0, 0.0), local(0.0, 11.0, 0.0));
-    c.push(local(0.0, 11.0, 5.0), Some("ada/site"), Kind::Commit { sha: SHA.into(), files: 3, added: 40, removed: 2, authored: None, committed: None, via: None, changes: vec![], replaces: None });
+    c.push(local(0.0, 11.0, 5.0), Some("ada/site"), Kind::Commit { sha: SHA.into(), files: 3, added: 40, removed: 2, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None });
     c.editing("ada/other", local(0.0, 14.0, 0.0), local(0.0, 14.0, 30.0));
     c.push(local(0.0, 16.0, 0.0), None, Kind::Focus { class: Class::Editor, app: None });
     for i in 1..=10 {
@@ -514,7 +514,7 @@ async fn fake_github() -> (String, Calls) {
 async fn more_commits(app: &TestApp, ada: &mut Browser<'_>) {
     let token = ada.pair("ada-third").await;
     let mut c = Chain::default();
-    let commit = |sha: &str, files, added, removed| Kind::Commit { sha: sha.into(), files, added, removed, authored: None, committed: None, via: None, changes: vec![], replaces: None };
+    let commit = |sha: &str, files, added, removed| Kind::Commit { sha: sha.into(), files, added, removed, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None };
     c.push(local(0.0, 12.0, 0.0), Some("ada/site"), commit("bbbb222", 1, 10, 1));
     c.push(local(0.0, 12.5, 0.0), Some("ada/site"), commit("cccc333", 2, 5, 5));
     c.push(local(0.0, 13.0, 0.0), Some("ada/gone"), commit("dddd444", 1, 1, 1));

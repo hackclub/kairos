@@ -733,7 +733,7 @@ fn facts_about_projects_and_commits_do_not_change_credit() {
                 let kind = match rng.below(8) {
                     0 => K::Start { version: "1".into(), os: "linux".into() },
                     1 => K::Backends { focus: "a".into(), idle: "b".into() },
-                    2 => K::Commit { sha: "abcdef1".into(), files: 1, added: 1, removed: 1, authored: None, committed: None, via: Some(Via::Commit), changes: vec![], replaces: None },
+                    2 => K::Commit { sha: "abcdef1".into(), files: 1, added: 1, removed: 1, authored: None, committed: None, via: Some(Via::Commit), changes: vec![], replaces: None, not_before: None },
                     3 => K::Diff { files: 1, added: 1, removed: 1, changes: vec![] },
                     4 => K::AgentCommit { session: "s1".into(), sha: None },
                     5 => K::ProjectAlias { from: "x/y".into() },

@@ -173,6 +173,10 @@ pub enum Kind {
         /// For an amend, the commit it replaced (HEAD before it, by the reflog): both were made, but only one stays.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaces: Option<String>,
+        /// When kairosd last read HEAD before its reflog recorded this commit being made, so it was made between this and
+        /// the event's `ts`. None when that can't be shown (pulled or checked out, or kairosd lost track of the reflog).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_before: Option<f64>,
     },
     Diff {
         files: u32,

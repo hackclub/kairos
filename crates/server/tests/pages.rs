@@ -71,7 +71,7 @@ fn files(paths: &[(&str, u32, u32)]) -> Vec<FileChange> {
 
 fn commit(sha: &str, via: Option<Via>, committed: Option<i64>, changes: Vec<FileChange>) -> Kind {
     let (added, removed) = changes.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-    Kind::Commit { sha: sha.into(), files: changes.len() as u32, added, removed, authored: None, committed, via, changes, replaces: None }
+    Kind::Commit { sha: sha.into(), files: changes.len() as u32, added, removed, authored: None, committed, via, changes, replaces: None, not_before: None }
 }
 
 fn edit(c: &mut Chain, ts: f64, harness: &str, path: &str, added: u32, removed: u32) {

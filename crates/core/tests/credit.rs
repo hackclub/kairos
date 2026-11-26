@@ -571,7 +571,7 @@ fn project_facts_change_no_credit_and_anchor_no_project() {
     events.extend(presents(60.0, 300.0));
     let before = credit_v4(&events);
     let mut with_git = events.clone();
-    with_git.push(ev(10.0, Some("o/r"), Kind::Commit { sha: "a".repeat(40), files: 3, added: 40, removed: 2, authored: None, committed: None, via: None, changes: vec![], replaces: None }));
+    with_git.push(ev(10.0, Some("o/r"), Kind::Commit { sha: "a".repeat(40), files: 3, added: 40, removed: 2, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None }));
     with_git.push(ev(20.0, Some("o/r"), Kind::Diff { files: 1, added: 5, removed: 0, changes: vec![] }));
     with_git.push(ev(30.0, Some("o/r"), Kind::ProjectAlias { from: "r".into() }));
     with_git.push(ev(40.0, Some("o/r"), Kind::Unknown));

@@ -39,7 +39,7 @@ async fn fill(app: &TestApp, b: &mut Browser<'_>) -> (String, String) {
     let mut chain = Chain::default();
     let t0 = 1_773_000_000.0;
     chain.editing("acme/app", t0, t0 + 600.0);
-    chain.push(t0 + 610.0, Some("acme/app"), Kind::Commit { sha: "abc1234".into(), files: 2, added: 10, removed: 1, authored: None, committed: None, via: None, changes: vec![], replaces: None });
+    chain.push(t0 + 610.0, Some("acme/app"), Kind::Commit { sha: "abc1234".into(), files: 2, added: 10, removed: 1, authored: None, committed: None, via: None, changes: vec![], replaces: None, not_before: None });
     chain.push(t0 + 620.0, Some("acme/app"), Kind::AgentStart { session: "s1".into() });
     chain.push(t0 + 900.0, Some("acme/app"), Kind::ReplyDone {
         session: "s1".into(),

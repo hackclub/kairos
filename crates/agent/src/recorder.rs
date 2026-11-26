@@ -332,6 +332,7 @@ mod tests {
             via: Some(Via::Commit),
             changes: changes.clone(),
             replaces: None,
+            not_before: None,
         };
         let saved = Kind::FileSave { count: 1, paths: vec!["src/private-name.rs".into()] };
         let diff = Kind::Diff { files: 1, added: 1, removed: 0, changes };
