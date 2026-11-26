@@ -339,13 +339,19 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
     let file = |path: &str| json!(project.join(path).to_string_lossy());
     const PATH: &[&str] = &["path", "filePath", "Path"];
     let (tool, wants): (&Value, Vec<(&[&str], Value)>) = match act {
-        Act::Write { path, content } => (find(&["write", "write_file"])?, vec![(PATH, file(path)), (&["content", "Content"], json!(content))]),
+        Act::Write { path, content } => (find(&["write", "write_file", "create"])?, vec![(PATH, file(path)), (&["content", "Content", "file_text"], json!(content))]),
         Act::Edit { path, old, new } => (
             find(&["edit", "edit_file"])?,
-            vec![(PATH, file(path)), (&["oldString", "Target"], json!(old)), (&["newString", "Replacement"], json!(new))],
+            vec![(PATH, file(path)), (&["oldString", "Target", "old_str"], json!(old)), (&["newString", "Replacement", "new_str"], json!(new))],
         ),
-        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash", "run_command"])?, vec![(&["command", "CommandLine"], json!(cmd))]),
+        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash", "powershell", "run_command"])?, vec![(&["command", "CommandLine"], json!(cmd))]),
     };
+    // Copilot CLI's `create` won't make a missing folder, where a model would first run mkdir.
+    if let (Act::Write { path, .. }, true) = (act, tool["name"] == "create") {
+        if let Some(dir) = project.join(path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
     let mut args = json!({});
     for (names, value) in wants {
         args[key(tool, names).unwrap_or_else(|| names[0].to_string())] = value;

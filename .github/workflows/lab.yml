@@ -14,10 +14,10 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: ""
+  CANDIDATE: "45738743538"
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: "two|codex-app|claude-desktop"
+  ONLY: ""
   SYSTEMS: ""
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
@@ -66,13 +66,14 @@ jobs:
         if: runner.os == 'Linux' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'linux'))
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends xvfb openbox xterm x11-utils xdotool
+          sudo apt-get install -y -q --no-install-recommends xvfb openbox x11-utils xdotool gnome-terminal dbus-x11
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x800x24 > /dev/null 2>&1 &
           for i in $(seq 50); do xdpyinfo > /dev/null 2>&1 && break; sleep 0.2; done
           openbox > /dev/null 2>&1 &
           for i in $(seq 50); do xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break; sleep 0.2; done
-          xterm -e ci/all.sh ${{ matrix.target }} --window
+          # Ubuntu's own terminal, which draws every window from one process.
+          dbus-run-session -- gnome-terminal --wait -- ci/all.sh ${{ matrix.target }} --window
           cat result.txt
           exit "$(cat failed.txt)"
       - name: every version (macOS)

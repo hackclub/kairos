@@ -44,6 +44,10 @@ impl Pane {
             std::fs::write(&script, format!("#!/bin/bash\nexec {} pane {port} {}\n", q(&exe.to_string_lossy()), q(&away)))?;
             Command::new("chmod").arg("+x").arg(&script).status()?;
             Command::new("open").args(["-a", "Terminal"]).arg(&script).status()?;
+        } else if std::env::var_os("GNOME_TERMINAL_SERVICE").is_some() {
+            // One gnome-terminal process draws both windows, the way it does on a person's desktop.
+            let ok = Command::new("gnome-terminal").args(["--window", "--"]).arg(&exe).args(["pane", &port, &away]).status().context("gnome-terminal")?;
+            anyhow::ensure!(ok.success(), "could not open a second gnome-terminal window");
         } else {
             // Not a child of the lab: the first window's process tree would hold the second window's agent too.
             let ok = Command::new("setsid").args(["-f", "xterm", "-T", "lab-pane", "-e"]).arg(&exe).args(["pane", &port, &away]).status().context("xterm")?;
@@ -86,6 +90,7 @@ fn line(stream: &mut TcpStream) -> Result<String> {
 /// The lab process in the second window.
 pub fn serve(port: &str, away: &str) -> Result<bool> {
     std::env::set_current_dir(away)?;
+    term::drain_stdin();
     let window = own(&format!("lab-pane-{port}"))?;
     let mut stream = TcpStream::connect(("127.0.0.1", port.parse::<u16>()?))?;
     stream.write_all(format!("{}\n", window.0).as_bytes())?;

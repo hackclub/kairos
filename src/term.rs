@@ -17,6 +17,17 @@ pub const ESC: &str = "\x1b";
 const ROWS: NonZeroU16 = NonZeroU16::new(40).unwrap();
 const COLS: NonZeroU16 = NonZeroU16::new(120).unwrap();
 
+/// Reads what is typed into this process's own window and drops it. The agents get their keys through their ptys;
+/// this is what makes the window's terminal read typing, the way it does for a person.
+pub fn drain_stdin() {
+    if cfg!(unix) {
+        thread::spawn(|| {
+            let mut buf = [0u8; 256];
+            while let Ok(1..) = std::io::stdin().read(&mut buf) {}
+        });
+    }
+}
+
 pub fn size() -> PtySize {
     PtySize { rows: ROWS.get(), cols: COLS.get(), pixel_width: 0, pixel_height: 0 }
 }

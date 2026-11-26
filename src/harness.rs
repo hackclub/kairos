@@ -125,6 +125,19 @@ pub const ALL: &[Harness] = &[
         writes_esc: false,
         prepare: antigravity,
     },
+    Harness {
+        id: "copilot-cli",
+        source: Source::Npm("@github/copilot"),
+        bin: "copilot",
+        stores: &[".copilot/session-state"],
+        state: &[".copilot"],
+        first_run: &[(&["Confirm folder trust", "❯ 1. Yes"], &[ENTER])],
+        ready: &["/ commands · ? help"],
+        during: &[],
+        marks_since: None,
+        writes_esc: true,
+        prepare: copilot,
+    },
 ];
 
 const ANTIGRAVITY: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
@@ -184,6 +197,14 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
     fs::write(dir.join("opencode.json"), serde_json::to_string_pretty(&config)?)?;
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
     Ok(Launch { args, resume, env: vars(&[("LAB_KEY", "lab")]), after })
+}
+
+fn copilot(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+    // Offline on a model of its own it needs no GitHub sign-in. A well-known model name gets it the right tools.
+    let base = format!("{model_url}/v1");
+    let env = [("COPILOT_OFFLINE", "true"), ("COPILOT_PROVIDER_BASE_URL", base.as_str()), ("COPILOT_PROVIDER_TYPE", "openai"), ("COPILOT_MODEL", "gpt-4.1")];
+    let args = vec!["--allow-all-tools".to_string()];
+    Ok(Launch { args: args.clone(), resume: args.into_iter().chain(["--continue".to_string()]).collect(), env: vars(&env), after: Vec::new() })
 }
 
 fn antigravity(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {

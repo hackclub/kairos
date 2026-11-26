@@ -56,7 +56,17 @@ fn send(term: &mut Term, model: &Model, i: usize, turn: &Turn, person: &Person) 
     sleep(Duration::from_millis(400));
     person.busy(false);
     person.press();
+    window_key(person)?;
     term.send(ENTER)
+}
+
+/// A key the person presses in the window in front, which reaches that window's terminal (the agents get theirs through
+/// their own ptys).
+fn window_key(person: &Person) -> Result<()> {
+    if cfg!(unix) {
+        person.enter()?;
+    }
+    Ok(())
 }
 
 /// Waits for the turn's answer, pressing what the harness asks for meanwhile.
@@ -120,6 +130,8 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, a: &Scenario, second: Seco
     // A second agent in the other window, in another project.
     desk.switch(false)?;
     secs(3);
+    // Typing the command that starts it.
+    window_key(&person)?;
     person.busy(false);
     let started = now();
     *second.term = Some(second.pane.start(&second.cmd, second.raw)?);
@@ -168,7 +180,9 @@ fn front(all: &[Value], shown: &[Shown]) -> Vec<String> {
             None => (json!("other"), Value::Null),
         };
         let had = || project.map_or("a window that is no project's".to_string(), |p| format!("agent_terminal in {p}"));
-        match focus.iter().rev().find(|f| f.0 <= from + LOOKS) {
+        // A window shown for less than LOOKS seconds is checked just before the next one.
+        let at = (from + LOOKS).min(to - 0.001);
+        match focus.iter().rev().find(|f| f.0 <= at) {
             Some((_, seen)) if *seen == want => {}
             Some((_, seen)) => problems.push(format!("{LOOKS} s after +{:.0} s the window in front was {} in project {}, the person had {}", from - first, seen.0, seen.1, had())),
             None => problems.push(format!("Kairos reported no window by +{:.0} s", from - first + LOOKS)),
@@ -202,6 +216,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     eprintln!("lab: {} {version}, scenario two, run folder {}", h.id, p.run.display());
 
     let person = Person::new(true)?;
+    crate::term::drain_stdin();
     let mut daemon = daemon(args, &p)?;
     sleep(Duration::from_secs(2));
     let launch = (h.prepare)(&p.home, &p.project, &url, &version)?;
@@ -211,6 +226,8 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     // It opens in front, and the person goes back to their own window to start.
     sleep(Duration::from_secs(1));
     pane::raise(&main)?;
+    secs(3);
+    window_key(&person)?;
     let mut desk = Desk { person: person.clone(), main, pane: pane.window.clone(), up: false, shown: Vec::new() };
     let mut term = Term::spawn(command(&bin, &launch.args, &p.project, &p.home, &launch.env), &p.run.join("pty.raw"))?;
     let seen = wait_focus(&p.kd, "proj", 0.0)?;

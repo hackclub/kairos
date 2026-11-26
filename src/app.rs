@@ -455,10 +455,19 @@ fn codex_start(page: &mut Page, run: &Path, project: &str) -> Result<()> {
                 bail!("the Codex app lists no {project}:\n{log}");
             }
             sleep(Duration::from_secs(3));
+            let unset = |page: &mut Page| -> Result<bool> { Ok(page.ax()?.iter().any(|(r, n, _)| r == "button" && n == "Choose project")) };
+            // The sidebar button can leave the message box without a project; its own picker sets one.
+            if unset(&mut *page)? && page.ax_click(&["button"], "Choose project")? {
+                sleep(Duration::from_secs(1));
+                let picked = page.ax_click(&["menuitem", "menuitemradio", "option", "listitem", "radio"], project)?;
+                log += &format!("picked {project} in the message box: {picked}\n");
+                sleep(Duration::from_secs(2));
+            }
             let ax = page.ax()?;
             let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
             fs::write(run.join("ax-chat.txt"), lines.join("\n"))?;
-            if ax.iter().any(|(r, n, _)| r == "button" && n == "Choose project") {
+            fs::write(run.join("steps.txt"), &log)?;
+            if unset(&mut *page)? {
                 bail!("the new chat in the Codex app is in no project");
             }
             return Ok(());
