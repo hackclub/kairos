@@ -41,6 +41,8 @@ jobs:
           export KAIROS_DIR="$RUNNER_TEMP/kairos"
           repo="$RUNNER_TEMP/e2e/kairos-e2e-proj"
           mkdir -p "$repo/.git"
+          # The real-app test leaves a Terminal window open, and two windows with nobody typing show no project.
+          if pgrep -x Terminal > /dev/null; then osascript -e 'tell application "Terminal" to quit' || pkill -x Terminal; sleep 2; fi
           target/debug/kairosd 2> "$RUNNER_TEMP/kairosd.err" &
           pid=$!
           sleep 3

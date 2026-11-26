@@ -11,6 +11,8 @@ mod linux;
 mod macos;
 #[cfg(any(windows, test))]
 mod tabs;
+#[cfg(unix)]
+mod ttys;
 #[cfg(windows)]
 mod windows;
 
@@ -56,8 +58,11 @@ pub struct Foreground {
     pub wclass: String,
     pub title: String,
     /// For terminals that run every window and tab in one process (Windows Terminal): the sessions this window shows,
-    /// all of the window's when the one in use is unknown. Empty when everything the process runs is the window's.
+    /// all of the window's when the one in use is unknown. Empty when everything the process runs is the window's. On
+    /// macOS and Linux the terminal's own pid alone means none of its sessions is known to be this window's.
     pub sessions: Vec<u32>,
+    /// The window in front, 0 when the backend can't say. Only compared, never shown.
+    pub window: u64,
 }
 
 #[derive(Clone)]

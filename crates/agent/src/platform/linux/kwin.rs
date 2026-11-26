@@ -2,6 +2,7 @@
 //! service owned here whenever the active window or its title changes.
 
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
@@ -33,7 +34,7 @@ fn script_source() -> String {
 
 function send(w) {{
     callDBus("{SERVICE}", "{PATH}", "{INTERFACE}", "Activated",
-        w ? String(w.pid) : "0", w ? String(w.resourceClass) : "", w ? String(w.caption) : "");
+        w ? String(w.pid) : "0", w ? String(w.resourceClass) : "", w ? String(w.caption) : "", w ? String(w.internalId) : "");
 }}
 
 function onCaption() {{
@@ -58,9 +59,15 @@ onActivated(workspace.activeWindow || workspace.activeClient);
     )
 }
 
-fn foreground(pid: &str, class: &str, caption: &str) -> Option<Foreground> {
+fn foreground(pid: &str, class: &str, caption: &str, window: &str) -> Option<Foreground> {
     let pid = pid.parse::<u32>().ok().filter(|p| *p > 0)?;
-    Some(Foreground { pid, wclass: class.to_owned(), title: caption.to_owned(), sessions: Vec::new() })
+    let window = (!window.is_empty()).then(|| {
+        let mut h = DefaultHasher::new();
+        window.hash(&mut h);
+        h.finish() | 1
+    });
+    let window = window.unwrap_or(0);
+    Some(Foreground { pid, wclass: class.to_owned(), title: caption.to_owned(), sessions: Vec::new(), window })
 }
 
 struct Focus {
@@ -69,9 +76,9 @@ struct Focus {
 
 #[interface(name = "dev.obayy.Kairos.Focus")]
 impl Focus {
-    fn activated(&self, pid: &str, resource_class: &str, caption: &str) {
+    fn activated(&self, pid: &str, resource_class: &str, caption: &str, window: &str) {
         if let Ok(mut r) = self.reporter.lock() {
-            r.report(foreground(pid, resource_class, caption));
+            r.report(foreground(pid, resource_class, caption, window));
         }
     }
 }
@@ -155,10 +162,13 @@ mod tests {
     #[test]
     fn reports_parse_into_foregrounds() {
         assert_eq!(
-            foreground("4242", "kitty", "~"),
-            Some(Foreground { pid: 4242, wclass: "kitty".into(), title: "~".into(), sessions: vec![] })
+            foreground("4242", "kitty", "~", ""),
+            Some(Foreground { pid: 4242, wclass: "kitty".into(), title: "~".into(), sessions: vec![], window: 0 })
         );
-        assert_eq!(foreground("0", "", ""), None);
-        assert_eq!(foreground("junk", "kitty", "~"), None);
+        let a = foreground("4242", "kitty", "~", "{a1}").unwrap().window;
+        assert!(a != 0 && a == foreground("4242", "kitty", "~", "{a1}").unwrap().window, "the same window, the same id");
+        assert_ne!(a, foreground("4242", "kitty", "~", "{b2}").unwrap().window);
+        assert_eq!(foreground("0", "", "", ""), None);
+        assert_eq!(foreground("junk", "kitty", "~", ""), None);
     }
 }

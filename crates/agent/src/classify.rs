@@ -71,6 +71,10 @@ pub fn is_console_host(name: &str) -> bool {
     is_one_of(CONSOLE_HOSTS, name)
 }
 
+pub fn is_terminal(name: &str, wclass: &str) -> bool {
+    is_one_of(TERMINALS, name) || is_one_of(TERMINALS, &wclass.to_lowercase())
+}
+
 pub fn is_browser(name: &str, wclass: &str) -> bool {
     is_one_of(BROWSERS, name) || is_one_of(BROWSERS, wclass)
 }
@@ -174,7 +178,6 @@ impl Tree {
         self.children.entry(parent).or_default().push(pid);
     }
 
-    #[cfg(windows)]
     pub fn show(&mut self, owner: u32, pids: &[u32]) {
         self.children.insert(owner, pids.iter().copied().filter(|p| *p != owner).collect());
     }
@@ -216,6 +219,11 @@ pub trait Procs {
     fn exe(&self, pid: u32) -> Option<PathBuf>;
     fn cwd(&self, pid: u32) -> Option<PathBuf>;
     fn cmdline(&self, pid: u32) -> Vec<String>;
+    /// The terminal device the process runs on, where the system can tell.
+    #[cfg(unix)]
+    fn tty(&self, _pid: u32) -> Option<u64> {
+        None
+    }
 }
 
 fn is_agent_cli<P: Procs>(p: &P, pid: u32) -> bool {
@@ -432,7 +440,7 @@ pub fn classify_with<P: Procs>(p: &P, pid: u32, wclass: &str, title: &str, ex: &
 fn classify_parts<P: Procs>(p: &P, pid: u32, name: &str, wclass: &str, title: &str, g: &Guard) -> (Class, Option<Project>) {
     let console = wclass == CONSOLE_WINDOW;
     let wclass = wclass.to_lowercase();
-    if console || is_one_of(TERMINALS, name) || is_one_of(TERMINALS, &wclass) {
+    if console || is_terminal(name, &wclass) {
         return classify_terminal(p, pid, console, P::TITLE_HINTS && is_agent_title(title), g);
     }
     if is_browser(name, &wclass) {

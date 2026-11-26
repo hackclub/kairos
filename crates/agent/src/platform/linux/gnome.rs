@@ -15,10 +15,17 @@ const SHELL: &str = "org.gnome.Shell";
 const PATH: &str = "/dev/obayy/Kairos";
 const INTERFACE: &str = "dev.obayy.Kairos.Focus1";
 
+// An extension loaded before 0.1.22 only has `Get`, and GNOME loads the new one at the next login.
 fn focused(conn: &Connection) -> Result<Option<Foreground>> {
     let proxy = Proxy::new(conn, SHELL, PATH, INTERFACE)?;
-    let (pid, wclass, title): (u32, String, String) = proxy.call("Get", &())?;
-    Ok((pid > 0).then_some(Foreground { pid, wclass, title, sessions: Vec::new() }))
+    let (pid, wclass, title, window) = match proxy.call::<_, _, (u32, String, String, u64)>("GetWindow", &()) {
+        Ok(got) => got,
+        Err(_) => {
+            let (pid, wclass, title): (u32, String, String) = proxy.call("Get", &())?;
+            (pid, wclass, title, 0)
+        }
+    };
+    Ok((pid > 0).then_some(Foreground { pid, wclass, title, sessions: Vec::new(), window }))
 }
 
 pub fn start(env: &SessionEnv, fg: Sender<Option<Foreground>>) -> Result<Running> {

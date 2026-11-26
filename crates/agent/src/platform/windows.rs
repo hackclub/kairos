@@ -376,7 +376,7 @@ fn foreground(buf: &mut [u16], sessions: &Sessions, consoles: &[Pseudo]) -> Opti
     let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
     let title = String::from_utf16_lossy(&buf[..n]);
     let sessions = sessions.shown(consoles, hwnd as usize);
-    Some((hwnd as usize, Foreground { pid, wclass: wclass.to_string(), title, sessions }))
+    Some((hwnd as usize, Foreground { pid, wclass: wclass.to_string(), title, sessions, window: hwnd as usize as u64 }))
 }
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {

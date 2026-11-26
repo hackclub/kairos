@@ -132,7 +132,7 @@ impl X11 {
     pub fn window_info(&self, window: Window) -> Option<Foreground> {
         self.conn.get_window_attributes(window).ok()?.reply().ok()?;
         let pid = self.first_u32(window, self.atoms._NET_WM_PID, AtomEnum::CARDINAL).unwrap_or(0);
-        Some(Foreground { pid, wclass: self.class(window), title: self.title(window), sessions: Vec::new() })
+        Some(Foreground { pid, wclass: self.class(window), title: self.title(window), sessions: Vec::new(), window: u64::from(window) })
     }
 
     fn watch(&self, window: Window, mask: EventMask) {

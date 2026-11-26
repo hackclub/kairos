@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 use crate::classify::{normalize, Procs, Tree};
@@ -23,6 +24,19 @@ impl ProcFs {
         }
         ProcFs { tree }
     }
+
+    pub fn show(&mut self, owner: u32, pids: &[u32]) {
+        self.tree.show(owner, pids);
+    }
+}
+
+/// When the pty was last read, from `/dev/pts`.
+pub fn tty_atime(dev: u64) -> Option<f64> {
+    let matching = |p: PathBuf| fs::metadata(&p).ok().filter(|m| m.rdev() == dev);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
+    let meta = matching(PathBuf::from(format!("/dev/pts/{minor}")))
+        .or_else(|| fs::read_dir("/dev/pts").ok()?.flatten().find_map(|e| matching(e.path())))?;
+    crate::platform::ttys::secs(meta.accessed().ok()?)
 }
 
 impl Procs for ProcFs {
@@ -60,6 +74,24 @@ impl Procs for ProcFs {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn tty(&self, pid: u32) -> Option<u64> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = &stat[stat.rfind(')')? + 1..];
+        let tty = rest.split_whitespace().nth(4)?.parse::<i64>().ok()?;
+        u64::try_from(tty).ok().filter(|t| *t != 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::Procs;
+
+    #[test]
+    fn a_pty_read_is_seen_and_its_process_named() {
+        crate::platform::ttys::check_a_real_terminal(tty_atime, |pid| ProcFs::scan().tty(pid));
     }
 }
 

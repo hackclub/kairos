@@ -1,6 +1,7 @@
 use std::ffi::{c_char, c_int, OsStr, OsString};
 use std::mem::{size_of, MaybeUninit};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
@@ -20,6 +21,22 @@ impl LibProc {
         }
         LibProc { tree }
     }
+
+    pub fn show(&mut self, owner: u32, pids: &[u32]) {
+        self.tree.show(owner, pids);
+    }
+}
+
+/// When the terminal device was last read.
+pub fn tty_atime(dev: u64) -> Option<f64> {
+    // SAFETY: devname returns null or a NUL-terminated name in a static buffer, copied right away (one caller thread).
+    let name = unsafe { libc::devname(libc::dev_t::try_from(dev).ok()?, libc::S_IFCHR) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let meta = std::fs::metadata(Path::new("/dev").join(name)).ok().filter(|m| m.rdev() == dev)?;
+    crate::platform::ttys::secs(meta.accessed().ok()?)
 }
 
 impl Procs for LibProc {
@@ -53,6 +70,22 @@ impl Procs for LibProc {
 
     fn cmdline(&self, pid: u32) -> Vec<String> {
         procargs(pid).map(|b| parse_procargs(&b)).unwrap_or_default()
+    }
+
+    // Only the user's own processes say: Terminal's `login` is root's, the shell under it is the first that does.
+    fn tty(&self, pid: u32) -> Option<u64> {
+        let size = size_of::<libc::proc_bsdinfo>() as c_int;
+        let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        // SAFETY: the buffer is a zeroed proc_bsdinfo of `size` bytes, the flavor's exact struct.
+        let n = unsafe {
+            libc::proc_pidinfo(c_int::try_from(pid).ok()?, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+        };
+        if n != size {
+            return None;
+        }
+        // SAFETY: plain data that the kernel filled.
+        let dev = unsafe { info.assume_init() }.e_tdev;
+        (dev != 0 && dev != u32::MAX).then_some(u64::from(dev))
     }
 }
 
@@ -182,6 +215,11 @@ mod tests {
         assert!(parse_procargs(&[1, 0]).is_empty());
         assert!(parse_procargs(&procargs_buf(2, "/bin/sh", 0, &[])).is_empty());
         assert!(parse_procargs(&procargs_buf(-1, "/bin/sh", 1, &["sh"])).is_empty());
+    }
+
+    #[test]
+    fn a_tty_read_is_seen_and_its_process_named() {
+        crate::platform::ttys::check_a_real_terminal(tty_atime, |pid| LibProc::scan().tty(pid));
     }
 
     #[test]

@@ -53,7 +53,7 @@ impl Reporter {
     // Titles only influence classification for browsers, editors and agent apps (see `titles_matter`).
     fn title_only_change(&mut self, fg: Option<&Foreground>) -> bool {
         let (Some(prev), Some(new)) = (self.last.as_mut(), fg) else { return false };
-        if prev.pid != new.pid || prev.wclass != new.wclass || titles_matter(&exe_name(new.pid), &new.wclass.to_lowercase()) {
+        if prev.pid != new.pid || prev.wclass != new.wclass || prev.window != new.window || titles_matter(&exe_name(new.pid), &new.wclass.to_lowercase()) {
             return false;
         }
         prev.title.clone_from(&new.title);
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
 
     fn fg(pid: u32, class: &str, title: &str) -> Option<Foreground> {
-        Some(Foreground { pid, wclass: class.into(), title: title.into(), sessions: Vec::new() })
+        Some(Foreground { pid, wclass: class.into(), title: title.into(), sessions: Vec::new(), window: 0 })
     }
 
     #[test]
@@ -106,6 +106,17 @@ mod tests {
         assert!(r.report(fg(7, "foot", "a")));
         assert!(r.report(fg(7, "foot", "b")));
         assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn another_window_of_the_same_terminal_is_reported() {
+        let (tx, rx) = mpsc::channel();
+        let mut r = Reporter::new(tx);
+        let in_window = |w: u64, title: &str| fg(7, "gnome-terminal-server", title).map(|f| Foreground { window: w, ..f });
+        assert!(r.report(in_window(1, "a")));
+        assert!(r.report(in_window(1, "b")));
+        assert!(r.report(in_window(2, "b")));
+        assert_eq!(rx.try_iter().count(), 2);
     }
 
     #[test]

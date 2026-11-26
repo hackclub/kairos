@@ -12,7 +12,7 @@ use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
 
 use crate::classify::{classify_with, Classified};
 use crate::diag::diag;
-use crate::platform::{Backends, Foreground, InputWatch, Sinks};
+use crate::platform::{ttys, Backends, Foreground, InputWatch, Sinks};
 use crate::{now, Msg};
 
 const POLL: Duration = Duration::from_secs(1);
@@ -25,32 +25,43 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
 }
 
 pub fn classify(fg: &Foreground, ex: &Exclusions) -> Classified {
-    classify_with(&procs::LibProc::scan(), fg.pid, &fg.wclass, &fg.title, ex)
+    let mut snap = procs::LibProc::scan();
+    if !fg.sessions.is_empty() {
+        snap.show(fg.pid, &fg.sessions);
+    }
+    classify_with(&snap, fg.pid, &fg.wclass, &fg.title, ex)
 }
 
 pub fn spawn(sinks: Sinks) -> Backends {
-    thread::spawn(move || focus(sinks.foreground));
+    let hooks = ttys::Hooks { scan: procs::LibProc::scan, atime: procs::tty_atime, typed: typed_within };
+    let foreground = ttys::spawn(sinks.foreground, hooks);
+    thread::spawn(move || focus(foreground));
     let idle = if spawn_idle(sinks.events) { "cgeventsource" } else { "none" };
     Backends { focus: "cgwindowlist", idle }
 }
 
-fn foreground(pid: u32) -> Foreground {
+fn foreground((pid, window): (u32, u64)) -> Foreground {
     let wclass = procs::exe(pid).and_then(|e| front::bundle_id(&e)).unwrap_or_default();
-    Foreground { pid, wclass, title: String::new(), sessions: Vec::new() }
+    Foreground { pid, wclass, title: String::new(), sessions: Vec::new(), window }
 }
 
 fn focus(out: Sender<Option<Foreground>>) {
     let mut seen = None;
     loop {
-        let pid = front::front_pid();
-        if pid != seen {
-            seen = pid;
-            if out.send(pid.map(foreground)).is_err() {
+        let front = front::front_window();
+        if front != seen {
+            seen = front;
+            if out.send(front.map(foreground)).is_err() {
                 return;
             }
         }
         thread::sleep(POLL);
     }
+}
+
+fn typed_within(secs: f64) -> bool {
+    let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::HIDSystemState, CGEventType::KeyDown);
+    key.is_finite() && key <= secs + 0.2
 }
 
 fn idle_secs() -> Option<f64> {

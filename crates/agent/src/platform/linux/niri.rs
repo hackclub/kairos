@@ -89,6 +89,7 @@ impl Windows {
             wclass: w.app_id.clone().unwrap_or_default(),
             title: w.title.clone().unwrap_or_default(),
             sessions: Vec::new(),
+            window: w.id,
         })
     }
 }
@@ -140,7 +141,7 @@ mod tests {
     fn the_window_list_picks_the_focused_window() {
         let mut w = Windows::default();
         feed(&mut w, &OPEN.replace('\n', ""));
-        assert_eq!(w.foreground(), Some(Foreground { pid: 200, wclass: "firefox".into(), title: "docs".into(), sessions: vec![] }));
+        assert_eq!(w.foreground(), Some(Foreground { pid: 200, wclass: "firefox".into(), title: "docs".into(), sessions: vec![], window: 2 }));
     }
 
     #[test]

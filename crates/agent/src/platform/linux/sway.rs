@@ -59,6 +59,8 @@ fn request(path: &std::path::Path, kind: u32, payload: &[u8]) -> io::Result<Vec<
 #[derive(Deserialize, Default)]
 struct Node {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     focused: bool,
     pid: Option<i64>,
     app_id: Option<String>,
@@ -104,7 +106,7 @@ impl Node {
             .filter(|a| !a.is_empty())
             .or_else(|| self.window_properties.as_ref().and_then(|p| p.class.clone()))
             .unwrap_or_default();
-        Some(Foreground { pid, wclass, title: self.name.clone().unwrap_or_default(), sessions: Vec::new() })
+        Some(Foreground { pid, wclass, title: self.name.clone().unwrap_or_default(), sessions: Vec::new(), window: self.id })
     }
 }
 
@@ -230,20 +232,20 @@ mod tests {
         {"type":"workspace","focused":false,"nodes":[
           {"type":"con","focused":false,"pid":10,"app_id":"foot","name":"a"}],
          "floating_nodes":[
-          {"type":"floating_con","focused":true,"pid":2222,"app_id":null,"name":"x","window":77,"window_properties":{"class":"Xterm","instance":"xterm"}}]}]}]}"#;
+          {"type":"floating_con","id":31,"focused":true,"pid":2222,"app_id":null,"name":"x","window":77,"window_properties":{"class":"Xterm","instance":"xterm"}}]}]}]}"#;
 
     #[test]
     fn finds_the_focused_window_including_floating_ones() {
         let tree: Node = serde_json::from_str(TREE).unwrap();
         let node = tree.focused_leaf().unwrap();
         assert_eq!(node.window, Some(77));
-        assert_eq!(node.sway_foreground(), Some(Foreground { pid: 2222, wclass: "Xterm".into(), title: "x".into(), sessions: vec![] }));
+        assert_eq!(node.sway_foreground(), Some(Foreground { pid: 2222, wclass: "Xterm".into(), title: "x".into(), sessions: vec![], window: 31 }));
     }
 
     #[test]
     fn native_windows_use_the_app_id() {
         let node: Node = serde_json::from_str(r#"{"focused":true,"pid":10,"app_id":"foot","name":"~","window":null}"#).unwrap();
-        assert_eq!(node.sway_foreground(), Some(Foreground { pid: 10, wclass: "foot".into(), title: "~".into(), sessions: vec![] }));
+        assert_eq!(node.sway_foreground(), Some(Foreground { pid: 10, wclass: "foot".into(), title: "~".into(), sessions: vec![], window: 0 }));
     }
 
     #[test]
@@ -256,7 +258,7 @@ mod tests {
     fn window_events_parse_and_only_the_relevant_changes_report() {
         let ipc = Ipc { path: PathBuf::from("/nonexistent"), flavor: Flavor::Sway };
         let focus = br#"{"change":"focus","container":{"focused":true,"pid":5,"app_id":"foot","name":"t"}}"#;
-        assert_eq!(ipc.on_window_event(focus), Some(Some(Foreground { pid: 5, wclass: "foot".into(), title: "t".into(), sessions: vec![] })));
+        assert_eq!(ipc.on_window_event(focus), Some(Some(Foreground { pid: 5, wclass: "foot".into(), title: "t".into(), sessions: vec![], window: 0 })));
         let background_title = br#"{"change":"title","container":{"focused":false,"pid":6,"app_id":"foot","name":"t"}}"#;
         assert_eq!(ipc.on_window_event(background_title), None);
         let urgent = br#"{"change":"urgent","container":{"focused":true,"pid":5}}"#;

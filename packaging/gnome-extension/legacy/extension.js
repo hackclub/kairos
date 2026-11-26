@@ -10,6 +10,12 @@ const INTERFACE = `
       <arg type="s" direction="out" name="wm_class"/>
       <arg type="s" direction="out" name="title"/>
     </method>
+    <method name="GetWindow">
+      <arg type="u" direction="out" name="pid"/>
+      <arg type="s" direction="out" name="wm_class"/>
+      <arg type="s" direction="out" name="title"/>
+      <arg type="t" direction="out" name="window"/>
+    </method>
     <signal name="Changed"/>
   </interface>
 </node>`;
@@ -36,6 +42,15 @@ class KairosFocus {
         if (!w)
             return [0, '', ''];
         return [Math.max(w.get_pid(), 0), w.get_wm_class() || '', w.get_title() || ''];
+    }
+
+    // One terminal process can draw several windows, so the daemon needs to know when the window changes too.
+    GetWindow() {
+        const w = global.display.focus_window;
+        if (!w)
+            return [0, '', '', 0];
+        const [pid, wmClass, title] = this.Get();
+        return [pid, wmClass, title, w.get_id()];
     }
 
     _focusChanged() {

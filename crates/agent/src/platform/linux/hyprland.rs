@@ -25,6 +25,7 @@ fn socket_dir(env: &SessionEnv) -> Option<PathBuf> {
 
 #[derive(Deserialize)]
 struct Window {
+    address: Option<String>,
     pid: Option<i64>,
     class: Option<String>,
     title: Option<String>,
@@ -33,7 +34,8 @@ struct Window {
 fn parse_window(json: &[u8]) -> Option<Foreground> {
     let w: Window = serde_json::from_slice(json).ok()?;
     let pid = u32::try_from(w.pid?).ok().filter(|p| *p > 0)?;
-    Some(Foreground { pid, wclass: w.class.unwrap_or_default(), title: w.title.unwrap_or_default(), sessions: Vec::new() })
+    let window = w.address.as_deref().and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+    Some(Foreground { pid, wclass: w.class.unwrap_or_default(), title: w.title.unwrap_or_default(), sessions: Vec::new(), window })
 }
 
 fn active_window(dir: &std::path::Path) -> Option<Foreground> {
@@ -83,7 +85,7 @@ mod tests {
     #[test]
     fn parses_the_active_window() {
         let fg = parse_window(br#"{"address":"0x1","class":"kitty","title":"~","pid":4242}"#).unwrap();
-        assert_eq!(fg, Foreground { pid: 4242, wclass: "kitty".into(), title: "~".into(), sessions: vec![] });
+        assert_eq!(fg, Foreground { pid: 4242, wclass: "kitty".into(), title: "~".into(), sessions: vec![], window: 1 });
     }
 
     #[test]

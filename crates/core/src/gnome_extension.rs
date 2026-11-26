@@ -111,6 +111,26 @@ pub fn install_gnome_extension() -> Result<InstallOutcome> {
     Ok(if loaded { InstallOutcome::Active } else { InstallOutcome::ActiveAfterLogin })
 }
 
+/// Install writes the files once, so a newer kairosd brings an installed extension up to date. GNOME loads it at the
+/// next login.
+pub fn refresh_gnome_extension() -> Result<bool> {
+    let dir = extension_dir()?;
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    let version = run("gnome-shell", &["--version"]).ok_or_else(|| anyhow!("gnome-shell is not installed"))?;
+    let variant = Variant::for_version(&version).ok_or_else(|| anyhow!("unsupported GNOME Shell version"))?;
+    refresh_files(&dir, variant)
+}
+
+fn refresh_files(dir: &Path, variant: Variant) -> Result<bool> {
+    let stale = variant.files().iter().any(|(name, content)| fs::read_to_string(dir.join(name)).ok().as_deref() != Some(*content));
+    if stale {
+        write_files(dir, variant)?;
+    }
+    Ok(stale)
+}
+
 pub fn is_gnome_session() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("gnome")))
 }
@@ -170,7 +190,7 @@ mod tests {
         for js in [MODERN_EXTENSION, LEGACY_EXTENSION] {
             assert!(js.contains("dev.obayy.Kairos.Focus1"));
             assert!(js.contains("'/dev/obayy/Kairos'"));
-            assert!(js.contains("name=\"Get\"") && js.contains("name=\"Changed\""));
+            assert!(js.contains("name=\"Get\"") && js.contains("name=\"GetWindow\"") && js.contains("name=\"Changed\""));
         }
     }
 
@@ -201,6 +221,19 @@ mod tests {
         write_files(&dir, Variant::Legacy).unwrap();
         assert_eq!(fs::read_to_string(dir.join("extension.js")).unwrap(), LEGACY_EXTENSION);
         assert_eq!(fs::read_to_string(dir.join("metadata.json")).unwrap(), LEGACY_METADATA);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_extension_on_disk_is_brought_up_to_date_once() {
+        let dir = std::env::temp_dir().join(format!("kairos-gnome-refresh-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("extension.js"), "// 0.1.21").unwrap();
+        fs::write(dir.join("metadata.json"), MODERN_METADATA).unwrap();
+        assert!(refresh_files(&dir, Variant::Modern).unwrap());
+        assert_eq!(fs::read_to_string(dir.join("extension.js")).unwrap(), MODERN_EXTENSION);
+        assert!(!refresh_files(&dir, Variant::Modern).unwrap(), "nothing to do the second time");
         let _ = fs::remove_dir_all(&dir);
     }
 }
