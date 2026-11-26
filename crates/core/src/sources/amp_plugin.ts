@@ -17,6 +17,7 @@ function send(event: object) {
 
 export default function (amp: PluginAPI) {
 	const typed = new Set<string>()
+	const working = new Set<string>()
 	let version: string | undefined
 	if (/^amp(\.exe)?$/i.test(basename(process.execPath))) {
 		amp.$`${process.execPath} --version`.then(
@@ -31,6 +32,7 @@ export default function (amp: PluginAPI) {
 
 	amp.on('agent.start', async event => {
 		const id = event.thread.id
+		working.delete(id)
 		// A prompt counts when its thread is the one on screen: `amp -x` and subagent threads have none.
 		if (event.changesWorkflow || amp.activeThread.current?.id !== id) {
 			typed.delete(id)
@@ -42,15 +44,22 @@ export default function (amp: PluginAPI) {
 	})
 
 	amp.on('tool.result', async event => {
+		const id = event.thread.id
+		// Like the other harnesses, the agent counts as working from its first tool.
+		if (typed.has(id) && !working.has(id)) {
+			working.add(id)
+			send({ ev: 'start', ...base(id) })
+		}
 		if (event.status !== 'done') return
 		const commit = event.tool === 'shell_command' && String(event.input.command).includes('commit')
 		if (commit || event.tool === 'apply_patch' || event.tool === 'edit_file') {
-			send({ ev: 'tool', ...base(event.thread.id), tool: event.tool, input: event.input, output: event.output })
+			send({ ev: 'tool', ...base(id), tool: event.tool, input: event.input, output: event.output })
 		}
 	})
 
 	amp.on('agent.end', async event => {
 		const id = event.thread.id
+		working.delete(id)
 		if (!typed.delete(id)) return
 		const reply: string[] = []
 		let tools = 0

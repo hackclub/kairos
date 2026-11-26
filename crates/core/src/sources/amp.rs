@@ -124,6 +124,7 @@ fn facts(v: &Value) -> Vec<Found> {
                 },
             });
         }
+        Some("start") => out.push(Found { ts, cwd: root, kind: Kind::AgentStart { session: session.to_string() } }),
         Some("tool") => tool(ts, session, root.as_deref(), v, &mut out),
         Some("end") => {
             let reply = v.get("reply").and_then(Value::as_array);
@@ -291,6 +292,13 @@ mod tests {
         assert!(failed.is_empty());
         let other = of(r#""ev":"tool","tool":"shell_command","input":{"command":"echo commit","workdir":"/w/probe"},"output":{"output":"commit\n","exitCode":0}"#);
         assert!(other.is_empty());
+    }
+
+    #[test]
+    fn the_agent_starts_at_its_first_tool() {
+        let out = of(r#""ev":"start""#);
+        let [Found { ts, kind: Kind::AgentStart { session }, .. }] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!((*ts, session.as_str()), (1795554335.236, THREAD));
     }
 
     #[test]
