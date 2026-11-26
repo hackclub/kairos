@@ -17,8 +17,8 @@ env:
   CANDIDATE: "45738743538"
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: ""
-  SYSTEMS: ""
+  ONLY: "codex 0.172.0|claude-code 2.0.77"
+  SYSTEMS: "linux,macos"
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
@@ -30,7 +30,7 @@ jobs:
           - { os: windows-latest, target: windows-x86_64 }
           - { os: macos-latest, target: macos-aarch64 }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
