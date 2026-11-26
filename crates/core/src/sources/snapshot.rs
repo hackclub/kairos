@@ -23,6 +23,12 @@ pub(crate) struct Turn {
     pub reply_words: usize,
     pub tools: usize,
     pub files: usize,
+    /// When the store was last written, for the two below.
+    pub seen: f64,
+    /// The agent is waiting on the person, like a tool call to approve.
+    pub waiting: bool,
+    /// `done` is when the app found the turn cut off (closed mid-reply), not when it ended.
+    pub cut_off: bool,
 }
 
 #[derive(Default)]
@@ -30,6 +36,11 @@ struct Seen {
     u: f64,
     started: bool,
     done: bool,
+    paused: bool,
+    // What the turn's earlier reply_done (at a pause) already counted: words, tools, files.
+    sent: [usize; 3],
+    // The last write seen while the turn ran.
+    ran: f64,
     // Edits and commits go out in time order; `w` is the last one's time and `wn` how many share it.
     w: f64,
     wn: u32,
@@ -94,22 +105,35 @@ impl Snapshots {
                     },
                 ));
             }
-            if let (false, Some(ts)) = (st.started, t.started) {
+            if let (false, false, Some(ts)) = (st.started, st.paused, t.started) {
                 st.started = true;
                 out.push(found(ts, Kind::AgentStart { session: session.to_string() }));
             }
-            if let (false, Some(ts)) = (st.done, t.done) {
+            let reply = |sent: &mut [usize; 3]| {
+                let now = [t.reply_words, t.tools, t.files];
+                let [w, n, f] = [0, 1, 2].map(|i| now[i].saturating_sub(sent[i]));
+                *sent = now;
+                Kind::ReplyDone { session: session.to_string(), reply_words: w, tools: n, files_changed: f, model: t.model.clone() }
+            };
+            // A wait on the person ends the agent's run, and it runs again once they answer.
+            if !st.done && t.done.is_none() {
+                if t.waiting && !st.paused {
+                    st.paused = true;
+                    out.push(found(t.seen, reply(&mut st.sent)));
+                } else if !t.waiting && st.paused {
+                    (st.paused, st.started) = (false, true);
+                    out.push(found(t.seen, Kind::AgentStart { session: session.to_string() }));
+                }
+            }
+            if !st.done && t.done.is_none() && !t.waiting {
+                st.ran = st.ran.max(t.seen);
+            }
+            if let (false, Some(mut ts)) = (st.done, t.done) {
                 st.done = true;
-                out.push(found(
-                    ts,
-                    Kind::ReplyDone {
-                        session: session.to_string(),
-                        reply_words: t.reply_words,
-                        tools: t.tools,
-                        files_changed: t.files,
-                        model: t.model.clone(),
-                    },
-                ));
+                if t.cut_off && st.ran > 0.0 && !st.paused {
+                    ts = ts.min(st.ran);
+                }
+                out.push(found(ts, reply(&mut st.sent)));
             }
         }
     }
@@ -149,7 +173,7 @@ impl Snapshots {
         let sessions: Map<String, Value> = self
             .seen
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "u": s.u, "s": s.started, "d": s.done, "w": s.w, "n": s.wn })))
+            .map(|(k, s)| (k.clone(), json!({ "u": s.u, "s": s.started, "d": s.done, "p": s.paused, "c": s.sent, "r": s.ran, "w": s.w, "n": s.wn })))
             .collect();
         json!({ "since": self.since, "sessions": sessions })
     }
@@ -165,6 +189,9 @@ impl Snapshots {
                     u: s.get("u").and_then(Value::as_f64).unwrap_or(0.0),
                     started: s.get("s").and_then(Value::as_bool).unwrap_or(false),
                     done: s.get("d").and_then(Value::as_bool).unwrap_or(false),
+                    paused: s.get("p").and_then(Value::as_bool).unwrap_or(false),
+                    sent: s.get("c").and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or_default(),
+                    ran: s.get("r").and_then(Value::as_f64).unwrap_or(0.0),
                     w: s.get("w").and_then(Value::as_f64).unwrap_or(0.0),
                     wn: s.get("n").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
                 },

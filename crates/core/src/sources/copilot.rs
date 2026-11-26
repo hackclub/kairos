@@ -180,8 +180,12 @@ fn turns(session: &Value, file_time: f64) -> Vec<Turn> {
         let state = r.get("modelState");
         let value = state.and_then(|s| s.get("value")).and_then(Value::as_u64);
         let next = reqs.get(n + 1).and_then(|x| ms(x.get("timestamp")));
-        // ResponseModelState: 0 pending, 1 complete, 2 cancelled, 3 failed, 4 needs input.
+        // ResponseModelState: 0 pending, 1 complete, 2 cancelled, 3 failed, 4 needs input (a tool call to approve).
         let finished = matches!(value, Some(1..=3)) || (state.is_none() && result.is_some());
+        t.seen = file_time;
+        t.waiting = value == Some(4);
+        // VS Code cancels a reply it finds unfinished when it opens again, as of then, and records no working time.
+        t.cut_off = value == Some(2) && r.get("elapsedMs").is_none_or(Value::is_null);
         t.done = ms(state.and_then(|s| s.get("completedAt")))
             .or_else(|| {
                 finished.then(|| {
@@ -386,6 +390,91 @@ mod tests {
         whole["requests"].as_array_mut().unwrap().push(request("r2", t0 + 120.0, "now add a test"));
         fs::write(dir.session(), line(json!({ "kind": 0, "v": whole }))).unwrap();
         assert_eq!(names(&again.poll()), ["prompt"]);
+    }
+
+    fn written(path: &Path, at: f64) {
+        let f = fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(at)).unwrap();
+    }
+
+    fn state(value: u64) -> String {
+        line(json!({ "kind": 1, "k": ["requests", 0, "modelState"], "v": { "value": value } }))
+    }
+
+    fn reply_counts(f: &Found) -> (usize, usize, usize) {
+        match &f.kind {
+            Kind::ReplyDone { reply_words, tools, files_changed, .. } => (*reply_words, *tools, *files_changed),
+            k => panic!("{k:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_call_to_approve_ends_the_run_until_the_person_answers() {
+        let dir = Dir::new("approve");
+        let t0 = now().ceil() + 1.0;
+        fs::write(dir.session(), line(json!({ "kind": 0, "v": { "version": 3, "sessionId": "s1", "requests": [] } })))
+            .unwrap();
+        let mut src = Copilot::new(vec![dir.0.clone()]);
+        assert!(src.poll().is_empty());
+
+        let mut r = request("r1", t0, "please fix the failing parser test now");
+        r["response"] = response();
+        r["result"] = json!({ "timings": { "firstProgress": 2000 } });
+        dir.append(&line(json!({ "kind": 2, "k": ["requests"], "v": [r] })));
+        written(&dir.session(), t0 + 5.0);
+        assert_eq!(names(&src.poll()), ["prompt", "agent_start"]);
+
+        dir.append(&state(4));
+        written(&dir.session(), t0 + 20.0);
+        let out = src.poll();
+        assert_eq!(names(&out), ["reply_done"]);
+        assert_eq!((out[0].ts, reply_counts(&out[0])), (t0 + 20.0, (7, 1, 1)));
+
+        let mut again = Copilot::new(vec![dir.0.clone()]);
+        again.restore(&src.state());
+        dir.append(&state(0));
+        written(&dir.session(), t0 + 80.0);
+        let out = again.poll();
+        assert_eq!(names(&out), ["agent_start"]);
+        assert_eq!(out[0].ts, t0 + 80.0);
+
+        let mut more = response();
+        more.as_array_mut().unwrap().push(json!({ "value": "All tests pass now." }));
+        dir.append(&line(json!({ "kind": 1, "k": ["requests", 0, "response"], "v": more })));
+        dir.append(&line(json!({ "kind": 1, "k": ["requests", 0, "modelState"], "v": { "value": 1, "completedAt": (t0 + 100.0) * 1000.0 } })));
+        written(&dir.session(), t0 + 100.0);
+        let out = again.poll();
+        assert_eq!(names(&out), ["reply_done"]);
+        assert_eq!((out[0].ts, reply_counts(&out[0])), (t0 + 100.0, (4, 0, 0)));
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_closing_vs_code_ends_at_its_last_write() {
+        for (elapsed, end) in [(None, 30.0), (Some(25_000.0), 3600.0)] {
+            let dir = Dir::new("cut");
+            let t0 = now().ceil() + 1.0;
+            fs::write(dir.session(), line(json!({ "kind": 0, "v": { "version": 3, "sessionId": "s1", "requests": [] } })))
+                .unwrap();
+            let mut src = Copilot::new(vec![dir.0.clone()]);
+            assert!(src.poll().is_empty());
+
+            let mut r = request("r1", t0, "please fix the failing parser test now");
+            r["response"] = response();
+            dir.append(&line(json!({ "kind": 2, "k": ["requests"], "v": [r] })));
+            written(&dir.session(), t0 + 30.0);
+            assert_eq!(names(&src.poll()), ["prompt", "agent_start"]);
+
+            // Opened again an hour later, VS Code marks it cancelled as of then. A cancel it timed has elapsedMs.
+            if let Some(e) = elapsed {
+                dir.append(&line(json!({ "kind": 1, "k": ["requests", 0, "elapsedMs"], "v": e })));
+            }
+            let cancelled = json!({ "value": 2, "completedAt": (t0 + 3600.0) * 1000.0 });
+            dir.append(&line(json!({ "kind": 1, "k": ["requests", 0, "modelState"], "v": cancelled })));
+            written(&dir.session(), t0 + 3600.0);
+            let out = src.poll();
+            assert_eq!(names(&out), ["reply_done"]);
+            assert_eq!(out[0].ts, t0 + end);
+        }
     }
 
     #[test]
