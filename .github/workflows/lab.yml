@@ -14,7 +14,7 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: "45805340165"
+  CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
   ONLY: ""
