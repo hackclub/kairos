@@ -167,10 +167,15 @@ pub fn own(title: &str) -> Result<Window> {
 
 #[cfg(windows)]
 pub fn own(_title: &str) -> Result<Window> {
-    // Started from a CI runner's shell, the lab has no console of its own and the runner's is the window in front.
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, IsWindowVisible, GA_ROOTOWNER};
     let mut hwnd = unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() };
-    if hwnd.is_null() {
-        hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    // Under Windows Terminal the console's window is a hidden one owned by the terminal's real window.
+    if !hwnd.is_null() && unsafe { IsWindowVisible(hwnd) } == 0 {
+        hwnd = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
+    }
+    // Started from a CI runner's shell, the lab has no console of its own and the runner's is the window in front.
+    if hwnd.is_null() || unsafe { IsWindowVisible(hwnd) } == 0 {
+        hwnd = unsafe { GetForegroundWindow() };
     }
     anyhow::ensure!(!hwnd.is_null(), "this process has no console window and no window is in front");
     Ok(Window((hwnd as usize).to_string()))
@@ -195,26 +200,76 @@ pub fn raise(w: &Window) -> Result<()> {
 
 #[cfg(windows)]
 pub fn raise(w: &Window) -> Result<()> {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
     let hwnd = w.0.parse::<usize>()? as windows_sys::Win32::Foundation::HWND;
     let key = |flags: u32| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     };
-    // Windows lets a program bring another window forward right after a key press, like the Alt this taps.
+    // Windows lets a program bring another window forward right after a key press, like the Alt this taps, or while it
+    // shares input with the window in front.
     let alt = [key(0), key(KEYEVENTF_KEYUP)];
     for _ in 0..3 {
         unsafe {
+            let front = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            let me = GetCurrentThreadId();
+            let joined = front != 0 && front != me && AttachThreadInput(me, front, 1) != 0;
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
             SendInput(alt.len() as u32, alt.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+            BringWindowToTop(hwnd);
             SetForegroundWindow(hwnd);
+            if joined {
+                AttachThreadInput(me, front, 0);
+            }
         }
         thread::sleep(Duration::from_millis(300));
         if unsafe { GetForegroundWindow() } == hwnd {
             return Ok(());
         }
     }
-    bail!("window {} would not come to the front", w.0)
+    let front = unsafe { GetForegroundWindow() };
+    bail!("window {} would not come to the front, {} is", describe(hwnd), describe(front))
+}
+
+/// A window the way a person would tell it apart: its class, whether it shows, its owner and its program.
+#[cfg(windows)]
+fn describe(hwnd: windows_sys::Win32::Foundation::HWND) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER};
+    if hwnd.is_null() {
+        return "none".into();
+    }
+    unsafe {
+        let mut class = [0u16; 128];
+        let n = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let mut exe = String::from("?");
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if !process.is_null() {
+            let mut path = [0u16; 512];
+            let mut len = path.len() as u32;
+            if QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len) != 0 {
+                let full = String::from_utf16_lossy(&path[..len as usize]);
+                exe = full.rsplit('\\').next().unwrap_or(&full).to_string();
+            }
+            CloseHandle(process);
+        }
+        format!(
+            "{} ({}, {}, owner {}, {exe} pid {pid})",
+            hwnd as usize,
+            String::from_utf16_lossy(&class[..n]),
+            if IsWindowVisible(hwnd) != 0 { "shown" } else { "hidden" },
+            GetWindow(hwnd, GW_OWNER) as usize,
+        )
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
