@@ -780,7 +780,7 @@ fn run() -> Result<bool> {
     let mut summary = None;
     if args.window {
         problems.extend(front(&all, h.id, "agent_terminal", &done.closed));
-        let (wrong, said) = credit::check(kd, h.id, "proj", &person)?;
+        let (wrong, said) = credit::check(kd, h.id, "proj", &person, &done.closed)?;
         problems.extend(wrong);
         summary = Some(said);
     }

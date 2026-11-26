@@ -177,7 +177,8 @@ fn summary(credits: &[Credit], person: &Person, owed: &[Span]) -> String {
     )
 }
 
-pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result<(Vec<String>, String)> {
+/// `closed`: while the harness was closed, when the window showed the lab itself, in the lab's own folder.
+pub fn check(kd: &Path, harness: &str, project: &str, person: &Person, closed: &[Span]) -> Result<(Vec<String>, String)> {
     let mut problems = Vec::new();
     let events = read(kd, &mut problems)?;
     let credits = Rule::CURRENT.apply(&events);
@@ -188,7 +189,11 @@ pub fn check(kd: &Path, harness: &str, project: &str, person: &Person) -> Result
     for c in &credits {
         *classes.entry(c.class.as_str()).or_default() += c.end - c.start;
         if c.project.as_deref() != Some(project) {
-            *elsewhere.entry(format!("{} in project {:?}", c.class.as_str(), c.project)).or_default() += c.end - c.start;
+            let away: Vec<Span> = closed.iter().map(|&(a, b)| (a, b + LOOKS)).collect();
+            let s = c.end - c.start - secs(&meet(&[(c.start, c.end)], &union(away)));
+            if s > 0.0 {
+                *elsewhere.entry(format!("{} in project {:?}", c.class.as_str(), c.project)).or_default() += s;
+            }
         }
     }
     for (what, s) in elsewhere {

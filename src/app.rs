@@ -975,7 +975,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let mut summary = None;
     if args.window {
         problems.extend(crate::front(&all, h.id, "agent_app", &[]));
-        let (wrong, said) = credit::check(&p.kd, h.id, "proj", &person)?;
+        let (wrong, said) = credit::check(&p.kd, h.id, "proj", &person, &[])?;
         problems.extend(wrong);
         summary = Some(said);
     }
