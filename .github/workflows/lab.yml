@@ -14,10 +14,10 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: ""
+  CANDIDATE: "45792125780"
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: ""
+  ONLY: "latest two"
   SYSTEMS: ""
   # The list of runs: versions.txt, or ci/mux.txt for the tmux and screen runs.
   VERSIONS: versions.txt
@@ -75,14 +75,14 @@ jobs:
           openbox > /dev/null 2>&1 &
           for i in $(seq 50); do xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break; sleep 0.2; done
           # Ubuntu's own terminal, which draws every window from one process.
-          dbus-run-session -- gnome-terminal --wait -- ci/all.sh ${{ matrix.target }} --window
+          dbus-run-session -- gnome-terminal --wait -- ci/all.sh ${{ matrix.target }} --window || true
           cat result.txt
           exit "$(cat failed.txt)"
       - name: every version (macOS)
         if: runner.os == 'macOS' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'macos'))
         run: |
           if grep -q tmux "$VERSIONS"; then HOMEBREW_NO_AUTO_UPDATE=1 brew install -q tmux; fi
-          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
+          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q RUNNER_TEMP=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$RUNNER_TEMP" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"
           for i in $(seq 3300); do [ -f failed.txt ] && break; sleep 2; done
@@ -116,8 +116,8 @@ jobs:
         with:
           name: lab-${{ matrix.target }}
           path: |
-            work
-            !work/*/home
+            ${{ runner.temp }}/work
+            !${{ runner.temp }}/work/*/home
           include-hidden-files: true
           retention-days: 7
   tell:
