@@ -200,9 +200,16 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
 }
 
 fn copilot(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
-    // Offline on a model of its own it needs no GitHub sign-in. A well-known model name gets it the right tools.
-    let base = format!("{model_url}/v1");
-    let env = [("COPILOT_OFFLINE", "true"), ("COPILOT_PROVIDER_BASE_URL", base.as_str()), ("COPILOT_PROVIDER_TYPE", "openai"), ("COPILOT_MODEL", "gpt-4.1")];
+    // Offline on a model of its own it needs no GitHub sign-in. A well-known model name gets it the right tools. People use
+    // reasoning models through the Responses API, which it logs in a message per reasoning step.
+    let base = format!("{model_url}/think/v1");
+    let env = [
+        ("COPILOT_OFFLINE", "true"),
+        ("COPILOT_PROVIDER_BASE_URL", base.as_str()),
+        ("COPILOT_PROVIDER_TYPE", "openai"),
+        ("COPILOT_PROVIDER_WIRE_API", "responses"),
+        ("COPILOT_MODEL", "gpt-5"),
+    ];
     let args = vec!["--allow-all-tools".to_string()];
     Ok(Launch { args: args.clone(), resume: args.into_iter().chain(["--continue".to_string()]).collect(), env: vars(&env), after: Vec::new() })
 }

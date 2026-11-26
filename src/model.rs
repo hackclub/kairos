@@ -280,8 +280,9 @@ fn offered(body: &Value) -> Vec<Value> {
     out
 }
 
-/// `side`: a job the app runs on the side, like naming a thread, which offers the same tools.
-fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool) -> (&'static str, String, String) {
+/// `side`: a job the app runs on the side, like naming a thread, which offers the same tools. `think`: answer like a
+/// reasoning model, with two reasoning items before each step, which some harnesses log as a message of their own.
+fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool, think: bool) -> (&'static str, String, String) {
     let tools = offered(body);
     let input = body["input"].as_array().cloned().unwrap_or_default();
     let main = !side && !tools.is_empty() && !input.is_empty();
@@ -309,6 +310,11 @@ fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool
                 }
                 Act::Shell { cmd } | Act::Asked { cmd } => shell_item(&tools, &call_id, cmd, &project),
             };
+            // Copilot CLI offers its chat completions tools here too.
+            let item = item.or_else(|| {
+                let (name, args) = chat_call(&tools, act, &project)?;
+                Some(json!({ "type": "function_call", "name": name, "arguments": args.to_string(), "call_id": call_id }))
+            });
             match item {
                 Some(item) => (id, item),
                 None => {
@@ -323,6 +329,18 @@ fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool
         "input_tokens": 10, "input_tokens_details": { "cached_tokens": 0 }, "output_tokens": 20,
         "output_tokens_details": { "reasoning_tokens": 0 }, "total_tokens": 30
     });
+    if think {
+        let reasoning = |n: usize| json!({ "type": "reasoning", "id": format!("rs_lab_{n}"), "summary": [{ "type": "summary_text", "text": "Thinking." }] });
+        let items = [reasoning(1), reasoning(2), item];
+        let mut events = vec![("response.created", json!({ "type": "response.created", "response": { "id": "resp_lab" } }))];
+        for (i, item) in items.iter().enumerate() {
+            events.push(("response.output_item.added", json!({ "type": "response.output_item.added", "output_index": i, "item": item })));
+            events.push(("response.output_item.done", json!({ "type": "response.output_item.done", "output_index": i, "item": item })));
+        }
+        let done = json!({ "id": "resp_lab", "status": "completed", "output": items, "usage": usage });
+        events.push(("response.completed", json!({ "type": "response.completed", "response": done })));
+        return ("text/event-stream", sse(&events), note);
+    }
     let out = sse(&[
         ("response.created", json!({ "type": "response.created", "response": { "id": "resp_lab" } })),
         ("response.output_item.done", json!({ "type": "response.output_item.done", "output_index": 0, "item": item })),
@@ -440,7 +458,7 @@ fn handle(state: &Mutex<State>, mut req: Request) {
                 || (h.field.equiv("x-codex-turn-metadata")
                     && serde_json::from_str::<Value>(h.value.as_str()).is_ok_and(|m| m["thread_source"].as_str().is_some_and(|s| s != "user")))
         });
-        responses(state, lane, &body, side)
+        responses(state, lane, &body, side, path.contains("/think/"))
     } else if path.ends_with("/chat/completions") {
         chat(state, lane, &body)
     } else {
