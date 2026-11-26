@@ -62,13 +62,49 @@
   </section>
   <section>
     <h2>Last 30 days</h2>
-    <div class="days">
+    <div class="days pickable{% if picker.preset != "month" %} dim{% endif %}" id="days">
       {% for d in days %}
-        <div title="{{ d.title }}" style="height:{{ d.pct }}%"></div>
+        <div title="{{ d.title }}" style="height:{{ d.pct }}%" data-day="{{ d.day }}"{% if d.on %} class="on"{% endif %}></div>
       {% endfor %}
     </div>
     <div class="axis"><span>{{ first_label }}</span><span>today</span></div>
   </section>
+  {% call m::picker(picker) %}{% endcall %}
+  <div class="boxes" id="boxes">
+    <section class="grid2">
+      {% call m::rows("Kind of work", classes) %}{% endcall %}
+      {% if let Some(t) = tools %}
+        {% call m::rows("AI tools", t) %}{% endcall %}
+      {% else %}
+        <div></div>
+      {% endif %}
+    </section>
+    {% if !languages.is_empty() %}
+      <section class="grid2">
+        {% call m::rows("Languages", languages) %}{% endcall %}
+        <div></div>
+      </section>
+    {% endif %}
+    {% if let Some(t) = tokens %}
+      <section id="tokens">
+        <h2>Tokens</h2>
+        {% if t.empty %}
+          <p class="empty px">No tokens on these days.</p>
+        {% else %}
+          <div class="cards tok">
+            <div class="stat px"><span>API cost</span><b>{{ t.cost }}</b></div>
+            <div class="stat px"><span>Tokens</span><b>{{ t.tokens }}</b></div>
+            {% if let Some(h) = t.per_hour %}<div class="stat px"><span>API cost per focus hour</span><b>{{ h }}</b></div>{% endif %}
+          </div>
+          <section class="grid2">
+            {% call m::trows("By model", t.models) %}{% endcall %}
+            <div></div>
+          </section>
+          <p class="muted small fine">Cost is an estimate at public API prices, not what you paid.{% if t.unpriced %} Models with no known price are left out of it.{% endif %}</p>
+        {% endif %}
+      </section>
+    {% endif %}
+  </div>
   <section>
     <h2>The past year</h2>
     <div class="card px">
@@ -76,20 +112,6 @@
       <p class="legend"><span>Less</span><span class="hl"><i class="h0"></i><i class="h1"></i><i class="h2"></i><i class="h3"></i><i class="h4"></i></span><span>More</span></p>
     </div>
   </section>
-  <section class="grid2">
-    {% call m::rows("Kind of work", classes) %}{% endcall %}
-    {% if let Some(t) = tools %}
-      {% call m::rows("AI tools", t) %}{% endcall %}
-    {% else %}
-      <div></div>
-    {% endif %}
-  </section>
-  {% if !languages.is_empty() %}
-    <section class="grid2">
-      {% call m::rows("Languages", languages) %}{% endcall %}
-      <div></div>
-    </section>
-  {% endif %}
   <section>
     <h2>Recent commits</h2>
     {% if commits.is_empty() %}

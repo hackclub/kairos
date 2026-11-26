@@ -16,6 +16,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (9, "device_grants", include_str!("../migrations/0009_device_grants.sql")),
     (10, "sign_in_repeat", include_str!("../migrations/0010_sign_in_repeat.sql")),
     (11, "commit_not_before", include_str!("../migrations/0011_commit_not_before.sql")),
+    (12, "tokens", include_str!("../migrations/0012_tokens.sql")),
 ];
 const MIGRATION_LOCK: i64 = 0x6b61_6972_6f73;
 

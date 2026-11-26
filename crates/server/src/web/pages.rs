@@ -14,6 +14,7 @@ use crate::auth::{SignedIn, User};
 use crate::credit::{day_start, local_day};
 use crate::live::{self, days_text, streak_label, Bar, Snapshot};
 use crate::streak;
+use crate::tokens;
 use crate::util::{err, human, now, short, urlenc, Res};
 use crate::St;
 
@@ -45,6 +46,7 @@ pub struct Summary {
 
 /// The dashboard's date picker. The calendar gets every day's focus seconds, keyed by date.
 pub struct Picker {
+    pub path: String,
     pub label: String,
     pub total: String,
     pub preset: &'static str,
@@ -95,7 +97,7 @@ fn sorted(m: BTreeMap<String, f64>) -> Vec<(String, f64)> {
 }
 
 /// Missing or unreadable dates fall back to the last 30 days. Days after today are cut.
-fn picked(from: Option<&str>, to: Option<&str>, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+pub fn picked(from: Option<&str>, to: Option<&str>, today: NaiveDate) -> (NaiveDate, NaiveDate) {
     let parse = |d: Option<&str>| d.and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).map(|d| d.min(today));
     match (parse(from), parse(to)) {
         (Some(a), Some(b)) => (a.min(b), a.max(b)),
@@ -189,20 +191,7 @@ async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>, 
     let langs = languages(st, u.id, &credited, lo, hi).await?;
     let picker = match pick {
         None => None,
-        Some(_) => {
-            let secs: BTreeMap<String, i64> = per_day.iter().filter(|d| *d.1 > 0.0).map(|(d, v)| (d.to_string(), v.round() as i64)).collect();
-            Some(Picker {
-                label: range_label(from, to, today),
-                total: human(per_day.range(from..=to).map(|d| d.1).sum()),
-                preset: preset(from, to, today),
-                from: from.to_string(),
-                to: to.to_string(),
-                today: today.to_string(),
-                week: today.checked_sub_days(Days::new(6)).unwrap_or(today).to_string(),
-                start: per_day.keys().next().unwrap_or(&today).min(&today).to_string(),
-                json: serde_json::to_string(&secs)?,
-            })
-        }
+        Some(_) => Some(picker("/me", from, to, today, &per_day)?),
     };
     Ok(Summary {
         days,
@@ -222,6 +211,23 @@ async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>, 
         ),
         languages: rows(langs, |_| None, |_| None),
         picker,
+    })
+}
+
+/// `per_day` is every day's focus seconds, for the calendar and the total of the picked days.
+pub fn picker(path: &str, from: NaiveDate, to: NaiveDate, today: NaiveDate, per_day: &BTreeMap<NaiveDate, f64>) -> Res<Picker> {
+    let secs: BTreeMap<String, i64> = per_day.iter().filter(|d| *d.1 > 0.0).map(|(d, v)| (d.to_string(), v.round() as i64)).collect();
+    Ok(Picker {
+        path: path.to_string(),
+        label: range_label(from, to, today),
+        total: human(per_day.range(from..=to).map(|d| d.1).sum()),
+        preset: preset(from, to, today),
+        from: from.to_string(),
+        to: to.to_string(),
+        today: today.to_string(),
+        week: today.checked_sub_days(Days::new(6)).unwrap_or(today).to_string(),
+        start: per_day.keys().next().unwrap_or(&today).min(&today).to_string(),
+        json: serde_json::to_string(&secs)?,
     })
 }
 
@@ -375,6 +381,7 @@ struct Me {
     timezone_set: bool,
     summary: Summary,
     tools: Option<Vec<Row>>,
+    tokens: Option<tokens::View>,
     devices: Vec<DeviceCard>,
     connected: Option<&'static str>,
 }
@@ -400,6 +407,11 @@ pub async fn me(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(q):
 
     let c = st.pool.get().await?;
     let timezone_set: bool = c.query_one("SELECT timezone_set FROM users WHERE id = $1", &[&u.id]).await?.get(0);
+    let token_view = if tokens::settings(&c, u.id).await?.on || tokens::any(&c, u.id, None).await? {
+        Some(tokens::view(&c, u.id, u.tz(), today, Some((from, to))).await?)
+    } else {
+        None
+    };
     let devices = c
         .query(
             "SELECT id, name, os, client_version, event_count, backends->>'focus', backends->>'idle',
@@ -433,6 +445,7 @@ pub async fn me(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(q):
         timezone_set,
         summary,
         tools: Some(tools),
+        tokens: token_view,
         devices,
         connected: match (q.connected.is_some(), q.hackatime.is_some()) {
             (true, true) => Some("This computer is connected, and Hackatime is set up on it too. Kairos runs in the background from now on, so you can close the terminal."),
@@ -457,6 +470,7 @@ struct Profile {
     bars: Vec<Bar>,
     summary: Summary,
     tools: Option<Vec<Row>>,
+    tokens: Option<tokens::View>,
 }
 
 pub async fn profile(State(st): State<St>, ctx: Ctx, Path(username): Path<String>) -> Res<Response> {
@@ -478,6 +492,14 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, Path(username): Path<String
     };
     let month = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let tools = if u.show_ai_tools || own { Some(tools(&st, u.id, month, today).await?) } else { None };
+    let token_view = {
+        let c = st.pool.get().await?;
+        if (own || tokens::settings(&c, u.id).await?.public) && tokens::any(&c, u.id, None).await? {
+            Some(tokens::view(&c, u.id, u.tz(), today, None).await?).filter(|v| !v.empty)
+        } else {
+            None
+        }
+    };
     let since: String = st
         .pool
         .get()
@@ -508,6 +530,7 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, Path(username): Path<String
         bars: live::bars(&days, false),
         summary,
         tools,
+        tokens: token_view,
     })
 }
 

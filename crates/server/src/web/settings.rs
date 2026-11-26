@@ -14,7 +14,7 @@ use super::{Base, Ctx};
 use crate::accounts::{self, check_username};
 use crate::aliases::{self, canon_projects};
 use crate::auth::{clear_session, Session, SignedIn};
-use crate::{audit, credit, live};
+use crate::{audit, credit, live, tokens};
 use crate::util::{clean, err, now, Res};
 use crate::St;
 
@@ -74,6 +74,8 @@ struct SettingsPage {
     notice: Option<String>,
     error: Option<String>,
     self_delete: bool,
+    tokens: tokens::Settings,
+    token_data: bool,
 }
 
 const NOTICES: &[(&str, &str)] = &[
@@ -81,6 +83,10 @@ const NOTICES: &[(&str, &str)] = &[
     ("project", "Project visibility saved."),
     ("device", "Device updated."),
     ("revoked", "Device disconnected. It can't upload anymore."),
+    ("tokens_on", "Token stats are on. Your devices start sending them within a few minutes."),
+    ("tokens_saved", "Token stats saved."),
+    ("tokens_off", "Token stats are off."),
+    ("tokens_deleted", "Token stats are off, and the ones Kairos had are deleted."),
 ];
 
 #[derive(Deserialize)]
@@ -147,6 +153,8 @@ async fn show(st: &St, ctx: &Ctx, s: &Session, status: StatusCode, notice: Optio
         )
         .await?
         .map(|r| KeyInfo { prefix: r.get(0), created: r.get(1), last_used: r.get(2) });
+    let token_settings = tokens::settings(&c, s.user.id).await?;
+    let token_data = tokens::any(&c, s.user.id, None).await?;
     let page = SettingsPage {
         base: Base::new(st, ctx, "Settings · Kairos"),
         profile,
@@ -159,6 +167,8 @@ async fn show(st: &St, ctx: &Ctx, s: &Session, status: StatusCode, notice: Optio
         notice,
         error,
         self_delete: st.config.self_delete,
+        tokens: token_settings,
+        token_data,
     };
     Ok((status, axum::response::Html(page.render()?)).into_response())
 }
@@ -215,6 +225,36 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Form
     tx.commit().await?;
     live::publish(&st, s.user.id);
     Ok(done("profile"))
+}
+
+#[derive(Deserialize)]
+pub struct TokensForm {
+    csrf: String,
+    on: String,
+    public: Option<String>,
+    delete: Option<String>,
+}
+
+/// Turning token stats off also takes them off public pages, so turning them on again starts private.
+pub async fn tokens(State(st): State<St>, SignedIn(s): SignedIn, Form(f): Form<TokensForm>) -> Res<Response> {
+    s.check_csrf(&f.csrf)?;
+    let mut c = st.pool.get().await?;
+    let tx = c.transaction().await?;
+    let what = if f.on == "1" {
+        let was = tokens::settings(&tx, s.user.id).await?.on;
+        tx.execute("UPDATE users SET tokens_on = TRUE, tokens_public = $2 WHERE id = $1", &[&s.user.id, &f.public.is_some()]).await?;
+        if was { "tokens_saved" } else { "tokens_on" }
+    } else {
+        tx.execute("UPDATE users SET tokens_on = FALSE, tokens_public = FALSE WHERE id = $1", &[&s.user.id]).await?;
+        if f.delete.is_some() {
+            tx.execute("DELETE FROM token_hours WHERE user_id = $1", &[&s.user.id]).await?;
+            "tokens_deleted"
+        } else {
+            "tokens_off"
+        }
+    };
+    tx.commit().await?;
+    Ok(Redirect::to(&format!("/settings?done={what}#tokens")).into_response())
 }
 
 #[derive(Deserialize)]

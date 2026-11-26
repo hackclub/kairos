@@ -109,6 +109,40 @@ api_key = {{ k }}</pre>
       {% endif %}
     </div>
   </section>
+  <section id="tokens">
+    <h2>Token stats</h2>
+    <div class="card px">
+      <p class="muted">See how many tokens your AI tools use and what they would cost at API prices.</p>
+      {% if tokens.on %}
+        <form class="form" method="post" action="/settings/tokens">
+          <input type="hidden" name="csrf" value="{{ base.csrf }}">
+          <input type="hidden" name="on" value="1">
+          <label class="check"><input type="checkbox" name="public"{% if tokens.public %} checked{% endif %}> Show token stats on my public profile and project pages</label>
+          <button class="btn px">Save</button>
+        </form>
+        <form class="form gap" method="post" action="/settings/tokens">
+          <input type="hidden" name="csrf" value="{{ base.csrf }}">
+          <input type="hidden" name="on" value="0">
+          <label class="check"><input type="checkbox" name="delete"> Also delete the token stats Kairos has</label>
+          <button class="btn light px">Turn off</button>
+        </form>
+      {% else %}
+        <form class="inline" method="post" action="/settings/tokens">
+          <input type="hidden" name="csrf" value="{{ base.csrf }}">
+          <input type="hidden" name="on" value="1">
+          <button class="btn px">Turn on</button>
+        </form>
+        {% if token_data %}
+          <form class="form gap" method="post" action="/settings/tokens">
+            <input type="hidden" name="csrf" value="{{ base.csrf }}">
+            <input type="hidden" name="on" value="0">
+            <input type="hidden" name="delete" value="1">
+            <button class="btn light px">Delete the token stats Kairos has</button>
+          </form>
+        {% endif %}
+      {% endif %}
+    </div>
+  </section>
   <section id="editor">
     <h2>Editor key</h2>
     <div class="card px">
@@ -169,7 +203,7 @@ api_key = {{ k }}</pre>
   <section id="export">
     <h2>Your data</h2>
     <div class="card px">
-      <p class="muted">One JSON file with your profile, devices, projects, credited time, editor heartbeat details and every raw event your devices sent.</p>
+      <p class="muted">One JSON file with your profile, devices, projects, credited time, editor heartbeat details, token stats and every raw event your devices sent.</p>
       <a class="btn px" href="/settings/export" download>Download my data</a>
     </div>
   </section>

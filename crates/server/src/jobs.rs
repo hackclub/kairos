@@ -18,6 +18,7 @@ pub async fn cleanup(st: &St) -> anyhow::Result<()> {
 }
 
 pub fn spawn(st: St) {
+    crate::prices::spawn(st.clone());
     let pool = st.pool.clone();
     tokio::spawn(async move {
         match crate::credit::rebuild_stale(&pool).await {

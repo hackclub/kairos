@@ -497,6 +497,37 @@ section h2 {
   transition: opacity .15s;
 }
 
+.cards.tok {
+  margin-top: 0;
+}
+
+.cards.tok + .days {
+  margin-top: 36px;
+}
+
+.tdays {
+  height: 120px;
+}
+
+.tdays div {
+  background: var(--h3);
+}
+
+.axis + .boxes > section:first-child,
+.cards.tok + .grid2 {
+  margin-top: 40px;
+}
+
+.fine {
+  margin: 20px 0 0;
+}
+
+.form.gap {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 2px dotted var(--line);
+}
+
 .rows {
   list-style: none;
   margin: 0;

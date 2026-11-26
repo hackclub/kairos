@@ -1,20 +1,21 @@
 use std::collections::BTreeMap;
 
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, Days, NaiveDate};
 use chrono_tz::Tz;
 use kairos_core::union;
 
-use super::pages::{ago, kind, project_path, rows, spoken, tool_name, DayBar, Row};
+use super::pages::{ago, kind, picked, picker, project_path, rows, spoken, tool_name, DayBar, Picker, Row};
 use super::{avatar, render, Base, Ctx};
 use crate::aliases::{self, canon_commits, canon_projects};
 use crate::api::events::repo_url;
 use crate::api::stats::{languages, load_spans, user_by_name};
 use crate::credit::{day_start, local_day};
 use crate::live::{self, Bar};
+use crate::tokens::{self, ProjectView};
 use crate::util::{err, human, now, short, Res};
 use crate::St;
 
@@ -58,10 +59,18 @@ struct Page {
     days: Vec<DayBar>,
     first_label: String,
     heat: Vec<Cell>,
+    picker: Picker,
     classes: Vec<Row>,
     languages: Vec<Row>,
     tools: Option<Vec<Row>>,
+    tokens: Option<ProjectView>,
     commits: Vec<Commit>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PickQ {
+    from: Option<String>,
+    to: Option<String>,
 }
 
 fn date(tz: Tz, ts: f64) -> String {
@@ -80,7 +89,7 @@ fn level(v: f64, max: f64) -> u8 {
 fn heat(per_day: &BTreeMap<NaiveDate, (f64, f64)>, today: NaiveDate) -> Vec<Cell> {
     let from = today.checked_sub_days(Days::new(HEAT_DAYS)).unwrap_or(today);
     let from = from.checked_sub_days(Days::new(u64::from(from.weekday().num_days_from_sunday()))).unwrap_or(from);
-    let max = per_day.values().map(|v| v.0).fold(0.0, f64::max);
+    let max = per_day.range(from..=today).map(|(_, v)| v.0).fold(0.0, f64::max);
     let mut out = Vec::new();
     let mut d = from;
     while d <= today {
@@ -95,7 +104,7 @@ fn heat(per_day: &BTreeMap<NaiveDate, (f64, f64)>, today: NaiveDate) -> Vec<Cell
     out
 }
 
-pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Path<(String, String)>) -> Res<Response> {
+pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Path<(String, String)>, Query(q): Query<PickQ>) -> Res<Response> {
     let not_found = || err(StatusCode::NOT_FOUND, "no such project");
     let u = user_by_name(&st, &username).await?.ok_or_else(not_found)?;
     let own = ctx.session.as_ref().is_some_and(|s| s.user.id == u.id);
@@ -120,15 +129,13 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
 
     let tz = u.tz();
     let today = local_day(tz, now());
-    let from = today.checked_sub_days(Days::new(HEAT_DAYS + 7)).unwrap_or(today);
+    let (from, to) = picked(q.from.as_deref(), q.to.as_deref(), today);
     let mut per_day: BTreeMap<NaiveDate, (f64, f64)> = BTreeMap::new();
     let mut classes: BTreeMap<String, f64> = BTreeMap::new();
-    let month_ago = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     for r in c
         .query(
-            "SELECT day, class, sum(seconds)::float8 FROM user_days WHERE user_id = $1 AND project = $2 AND day >= $3 AND day <= $4
-             GROUP BY day, class",
-            &[&u.id, &project, &from, &today],
+            "SELECT day, class, sum(seconds)::float8 FROM user_days WHERE user_id = $1 AND project = $2 AND day <= $3 GROUP BY day, class",
+            &[&u.id, &project, &today],
         )
         .await?
     {
@@ -138,7 +145,7 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
             e.1 += secs;
         } else {
             e.0 += secs;
-            if day >= month_ago {
+            if day >= from && day <= to {
                 *classes.entry(class).or_default() += secs;
             }
         }
@@ -172,12 +179,20 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
                 title: format!("{} · {}", d.format("%a %b %-d"), human(v)),
                 pct: format!("{:.1}", if max > 0.0 { v / max * 100.0 } else { 0.0 }),
                 day: d.to_string(),
-                on: false,
+                on: (from..=to).contains(d),
             }
         })
         .collect();
+    let path = project_path(&u.username, &project);
+    let focus: BTreeMap<NaiveDate, f64> = per_day.iter().map(|(d, v)| (*d, v.0)).collect();
+    let picker = picker(&path, from, to, today, &focus)?;
+    let picked_focus: f64 = focus.range(from..=to).map(|d| d.1).sum();
 
-    let (lo, hi) = (day_start(tz, month_ago), now() + 60.0);
+    let lo = day_start(tz, from);
+    let hi = match to.succ_opt() {
+        Some(next) if to < today => day_start(tz, next),
+        _ => now() + 60.0,
+    };
     let spans = load_spans(&st, u.id, lo, hi).await?;
     let credited = union(spans.iter().filter(|s| s.project.as_deref() == Some(project.as_str())).map(|s| (s.start, s.end)).collect());
     let langs = languages(&st, u.id, &credited, lo, hi).await?;
@@ -200,7 +215,7 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
             .query(
                 "SELECT harness, sum(prompts)::float8 FROM user_tool_days WHERE user_id = $1 AND project = $2 AND day >= $3 AND day <= $4
                  GROUP BY harness ORDER BY 2 DESC, 1 LIMIT 12",
-                &[&u.id, &project, &month_ago, &today],
+                &[&u.id, &project, &from, &to],
             )
             .await?
             .iter()
@@ -218,6 +233,18 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
                 })
                 .collect(),
         )
+    } else {
+        None
+    };
+
+    let token_view = if own || tokens::settings(&c, u.id).await?.public {
+        let mut ids = vec![project.clone()];
+        ids.extend(map.iter().filter(|(_, canon)| **canon == project).map(|(alias, _)| alias.clone()));
+        if tokens::any(&c, u.id, Some(&ids)).await? {
+            Some(tokens::project_view(&c, u.id, tz, &ids, from, to, picked_focus).await?)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -248,7 +275,6 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
     drop(c);
 
     let name = u.display_name.clone().unwrap_or_else(|| u.username.clone());
-    let path = project_path(&u.username, &project);
     let description = format!("{name} has spent {} of focus time on {project} with Kairos, {} of it this week.", spoken(total), spoken(week));
     render(&Page {
         base: Base::new(&st, &ctx, &format!("{project} by {name} · Kairos")).share(&description, &path, "website"),
@@ -271,9 +297,11 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
         days,
         first_label: dates.first().map(|d| d.format("%b %-d").to_string()).unwrap_or_default(),
         heat: heat(&per_day, today),
+        picker,
         classes,
         languages,
         tools,
+        tokens: token_view,
         commits,
     })
 }

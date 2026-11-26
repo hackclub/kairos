@@ -73,6 +73,10 @@
     </div>
   </section>
   {% include "summary.html" %}
+  {% include "tokens.html" %}
+  {% if tokens.is_none() %}
+    <p class="hint px">See how many tokens your AI tools use and what they would cost at API prices. <a href="/settings#tokens">Turn on token stats</a></p>
+  {% endif %}
   <section id="devices">
     <h2>Devices</h2>
     {% if devices.is_empty() %}

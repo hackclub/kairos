@@ -26,7 +26,7 @@ After install, WakaTime editor plugins send their heartbeats to Kairos, and Kair
 
 ## Privacy
 
-Kairos sends times, counts, project names and which files in a project you worked on. Your code, prompts, the agent's replies, window titles and tab addresses stay on your computer, and Kairos doesn't take screenshots.
+Kairos sends times, counts, project names and which files in a project you worked on. Your code, prompts, the agent's replies, window titles and tab addresses stay on your computer, and Kairos doesn't take screenshots. With token stats on, it also sends the token counts your AI tools log and which model each was for.
 
 - `kairos exclude <folder>` keeps a folder out completely.
 - `kairos pause [30m|1h|2h|tomorrow]` pauses tracking, `kairos resume` starts it again.

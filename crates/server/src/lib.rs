@@ -15,10 +15,12 @@ pub mod jobs;
 pub mod leaderboard;
 pub mod limits;
 pub mod live;
+pub mod prices;
 pub mod programs;
 pub mod security;
 pub mod signals;
 pub mod streak;
+pub mod tokens;
 pub mod util;
 pub mod wakatime;
 pub mod web;
@@ -96,6 +98,7 @@ pub fn router(st: St) -> Router {
         .route("/settings/devices/revoke", post(web::settings::revoke_device))
         .route("/settings/export", get(web::export::export))
         .route("/settings/delete", post(web::settings::delete))
+        .route("/settings/tokens", post(web::settings::tokens))
         .route("/admin", get(web::admin::page))
         .route("/admin/role", post(web::admin::role))
         .route("/admin/programs", post(web::admin::create_program))
@@ -131,6 +134,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/device/me", get(api::device::me))
         .route("/api/v1/device/logout", post(api::device::logout))
         .route("/api/v1/events", post(api::events::upload).layer(DefaultBodyLimit::max(8 * KB * KB)))
+        .route("/api/v1/tokens", get(tokens::state).post(tokens::upload).layer(DefaultBodyLimit::max(KB * KB)))
         .route("/api/v1/users/{username}/spans", get(api::stats::spans))
         .route("/api/hackatime/v1/users/current/heartbeats", post(wakatime::one))
         .route("/api/hackatime/v1/users/current/heartbeats.bulk", post(wakatime::bulk))

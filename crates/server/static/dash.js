@@ -234,16 +234,17 @@
     // Swaps in the same page for the new dates, so the dial and scroll position stay put.
     async function go(url) {
       const n = ++seq;
-      $('boxes').classList.add('loading');
+      ['boxes', 'tokboxes'].forEach((id) => $(id) && $(id).classList.add('loading'));
       try {
         const res = await fetch(url);
         if (!res.ok) throw new Error(String(res.status));
         const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
         if (n !== seq) return;
-        const parts = ['days', 'dates', 'boxes'].map((id) => [$(id), doc.getElementById(id)]);
-        if (parts.some(([, fresh]) => !fresh)) throw new Error('not the dashboard');
+        const parts = ['days', 'dates', 'boxes', 'tokdays', 'tokboxes'].map((id) => [$(id), doc.getElementById(id)]);
+        if (parts.slice(0, 3).some(([, fresh]) => !fresh)) throw new Error('not the same page');
+        if (parts.slice(3).some(([old, fresh]) => !old !== !fresh)) throw new Error('the token stats changed');
         const refocus = $('dates').contains(document.activeElement);
-        parts.forEach(([old, fresh]) => old.replaceWith(fresh));
+        parts.forEach(([old, fresh]) => old && old.replaceWith(fresh));
         if (refocus) $('pick').focus();
         history.replaceState(null, '', url);
       } catch {
@@ -254,7 +255,7 @@
     function pick(a, b) {
       const [lo, hi] = a <= b ? [a, b] : [b, a];
       closeCal();
-      go(`/me?from=${iso(lo)}&to=${iso(hi)}`);
+      go(`${$('dates').dataset.path}?from=${iso(lo)}&to=${iso(hi)}`);
     }
 
     function paint() {
@@ -335,7 +336,7 @@
         go(chip.getAttribute('href'));
         return;
       }
-      const bar = t.closest('#days div[data-day]');
+      const bar = t.closest('#days div[data-day], #tokdays div[data-day]');
       if (bar) {
         const d = parse(bar.dataset.day);
         pick(d, d);

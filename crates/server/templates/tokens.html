@@ -1,0 +1,28 @@
+{% import "macros.html" as m %}
+{% if let Some(t) = tokens %}
+  <section id="tokens">
+    <h2>Tokens</h2>
+    {% if t.empty %}
+      <p class="empty px">No token stats yet. Your devices send them a few minutes after you turn them on.</p>
+    {% else %}
+      <div class="cards tok">
+        {% for s in t.stats.iter() %}
+          <div class="stat px"><span>{{ s.label }}</span><b>{{ s.cost }}</b><p>{{ s.tokens }}</p></div>
+        {% endfor %}
+      </div>
+      <div class="days tdays{% if t.pickable %} pickable{% if t.dim %} dim{% endif %}{% endif %}" id="tokdays">
+        {% for d in t.days.iter() %}
+          <div title="{{ d.title }}" style="height:{{ d.pct }}%"{% if t.pickable %} data-day="{{ d.day }}"{% if d.on %} class="on"{% endif %}{% endif %}></div>
+        {% endfor %}
+      </div>
+      <div class="axis"><span>{{ t.first_label }}</span><span>today</span></div>
+      <div class="boxes" id="tokboxes">
+        <section class="grid2">
+          {% call m::trows("By AI tool", t.tools) %}{% endcall %}
+          {% call m::trows("Top models", t.models) %}{% endcall %}
+        </section>
+      </div>
+      <p class="muted small fine">Cost is an estimate at public API prices, not what you paid.{% if t.unpriced %} Models with no known price are left out of it.{% endif %}</p>
+    {% endif %}
+  </section>
+{% endif %}
