@@ -208,7 +208,7 @@ fn command(t: &mut Turn, ts: f64, id: Option<&str>, v: &Value, out: &mut Vec<Fou
 }
 
 // Codex 0.167 names a command's folder with a file:// URI.
-fn folder(s: &str) -> Option<PathBuf> {
+pub(crate) fn folder(s: &str) -> Option<PathBuf> {
     if s.starts_with("file://") {
         uri_path(s)
     } else {

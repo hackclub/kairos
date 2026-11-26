@@ -64,7 +64,7 @@ const SHOWN_CAP: usize = 2000;
 const SEEN_CAP: usize = 2000;
 const COWORK: &str = "local-agent-mode-sessions";
 
-fn skip(p: &Path) -> bool {
+pub(crate) fn skip(p: &Path) -> bool {
     let has = |name: &str| p.components().any(|c| c.as_os_str() == name);
     has(COWORK) && !has(".claude")
 }
@@ -84,12 +84,12 @@ fn cowork_folder(p: &Path) -> Option<PathBuf> {
     meta.get("userSelectedFolders")?.as_array()?.iter().find_map(|f| f.as_str()).map(PathBuf::from)
 }
 
-fn started_name(log: &Path) -> Option<String> {
+pub(crate) fn started_name(log: &Path) -> Option<String> {
     log.parent()?.file_name()?.to_str().map(str::to_string)
 }
 
 // How Claude Code names a folder's log folder: every UTF-16 unit that isn't an ASCII letter or digit becomes a dash.
-fn log_folder_name(folder: &Path) -> String {
+pub(crate) fn log_folder_name(folder: &Path) -> String {
     folder.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { "-".repeat(c.len_utf16()) }).collect()
 }
 

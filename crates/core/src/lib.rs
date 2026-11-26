@@ -15,6 +15,7 @@ pub mod pkce;
 pub mod project;
 pub mod shape;
 pub mod sources;
+pub mod tokens;
 pub mod update;
 pub mod upload;
 pub mod wakatime;

@@ -102,7 +102,7 @@ fn secs(ms: i64) -> f64 {
 // live inside the message JSON) and leaves the old tables as a stale copy. 2.4 saves each assistant
 // part as a session_part row instead and leaves the message's content empty.
 #[derive(Clone, Copy, PartialEq)]
-enum Schema {
+pub(crate) enum Schema {
     Legacy,
     V2 { rows: bool },
 }
@@ -156,7 +156,7 @@ struct WorkRow {
 }
 
 impl Schema {
-    fn detect(c: &Connection) -> Option<Schema> {
+    pub(crate) fn detect(c: &Connection) -> Option<Schema> {
         let has = |t: &str| {
             c.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1", [t], |_| Ok(())).is_ok()
         };
@@ -579,7 +579,7 @@ impl OpenCode {
     }
 }
 
-fn open(db: &Path) -> Option<Connection> {
+pub(crate) fn open(db: &Path) -> Option<Connection> {
     let c = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
     c.busy_timeout(Duration::from_secs(2)).ok()?;
     Some(c)

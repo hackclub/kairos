@@ -20,6 +20,7 @@ mod relay;
 mod sessions;
 mod shadow;
 mod status;
+mod tokens;
 mod tray;
 mod update;
 mod upload;
@@ -116,6 +117,7 @@ fn run(replace: Option<u32>) -> Result<()> {
     let bound = Arc::new(AtomicBool::new(false));
     logs::spawn(tx.clone(), wtx.clone(), dir.join("sources.json"), excluded.clone(), sessions.clone(), shadow.clone());
     upload::spawn(dir.clone(), status.clone());
+    tokens::spawn(dir.clone(), excluded.clone());
     update::spawn(dir.clone(), status.clone());
     let relay = Arc::new(relay::spawn(dir.clone()));
     wakatime::keep(dir.clone(), bound.clone());

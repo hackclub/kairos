@@ -27,7 +27,7 @@ pub fn default_roots() -> Vec<PathBuf> {
     ["antigravity", "antigravity-cli", "antigravity-ide"].iter().map(|p| home.join(".gemini").join(p)).collect()
 }
 
-fn list(root: &Path, files: &mut Vec<PathBuf>) {
+pub(crate) fn list(root: &Path, files: &mut Vec<PathBuf>) {
     for e in fs::read_dir(root.join("brain")).into_iter().flatten().flatten() {
         let p = e.path().join(TRANSCRIPT);
         if p.is_file() {
@@ -36,7 +36,7 @@ fn list(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn ts(e: &Value) -> Option<f64> {
+pub(crate) fn ts(e: &Value) -> Option<f64> {
     let s = e.get("created_at")?.as_str()?;
     let d = chrono::DateTime::parse_from_rfc3339(s).ok()?;
     Some(d.timestamp_millis() as f64 / 1000.0)
@@ -50,7 +50,7 @@ fn request(content: &str) -> &str {
 }
 
 // "The user changed setting `Model Selection` from A to B. ..."
-fn selected_model(content: &str) -> Option<String> {
+pub(crate) fn selected_model(content: &str) -> Option<String> {
     let rest = &content[content.find("`Model Selection`")?..];
     let rest = &rest[rest.find(" to ")? + 4..];
     let end = [rest.find(". "), rest.find('\n')].into_iter().flatten().min().unwrap_or(rest.len());
@@ -115,6 +115,11 @@ fn workspace_from_history(root: &Path, id: &str) -> Option<PathBuf> {
         }
         row.get("workspace").and_then(Value::as_str).and_then(uri_path)
     })
+}
+
+// The folder a conversation was opened in, from the same three places `Conv::refresh` looks.
+pub(crate) fn workspace(root: &Path, id: &str) -> Option<PathBuf> {
+    summary(root, id).and_then(|s| s.workspace).or_else(|| workspace_from_cache(root, id)).or_else(|| workspace_from_history(root, id))
 }
 
 // `agy -p` runs never reach the CLI's prompt history; prompts typed into the TUI land there within a second or two.

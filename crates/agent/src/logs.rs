@@ -24,7 +24,7 @@ const SAVE_EVERY: Duration = Duration::from_secs(60);
 const PROJECT_TTL: Duration = Duration::from_secs(60);
 const MAX_CACHED: usize = 1024;
 
-type Lookups = HashMap<PathBuf, (Instant, Option<Project>)>;
+pub(crate) type Lookups = HashMap<PathBuf, (Instant, Option<Project>)>;
 
 fn save(path: &PathBuf, text: &str) {
     let tmp = path.with_extension("json.tmp");
@@ -33,7 +33,7 @@ fn save(path: &PathBuf, text: &str) {
     }
 }
 
-fn cached_project(cache: &mut Lookups, cwd: &PathBuf) -> Option<Project> {
+pub(crate) fn cached_project(cache: &mut Lookups, cwd: &PathBuf) -> Option<Project> {
     if let Some((_, p)) = cache.get(cwd).filter(|(at, _)| at.elapsed() < PROJECT_TTL) {
         return p.clone();
     }
