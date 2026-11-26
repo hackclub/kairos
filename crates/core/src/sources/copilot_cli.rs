@@ -53,6 +53,8 @@ struct Sess {
     version: Option<String>,
     armed: bool,
     open: bool,
+    /// A chunk of the response being read asked for tools.
+    asked: bool,
     last_ts: f64,
     reply_words: usize,
     tools: usize,
@@ -94,6 +96,7 @@ impl Sess {
         }
         self.open = false;
         self.armed = false;
+        self.asked = false;
         out.push(Found {
             ts,
             cwd: self.cwd.clone(),
@@ -197,7 +200,14 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
         "assistant.message" => {
             s.last_ts = ts;
             s.reply_words += d.get("content").and_then(Value::as_str).map_or(0, words);
-            if d.get("toolRequests").and_then(Value::as_array).is_none_or(|t| t.is_empty()) {
+            s.asked |= d.get("toolRequests").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
+            // A reasoning model's response comes split into one message per reasoning boundary, and the turn only
+            // ends after a response that asked for no tools.
+            let last_chunk = match (d.get("chunkIndex").and_then(Value::as_u64), d.get("chunkCount").and_then(Value::as_u64)) {
+                (Some(i), Some(n)) => i + 1 >= n,
+                _ => true,
+            };
+            if last_chunk && !std::mem::take(&mut s.asked) {
                 s.close(ts, out);
             }
         }
@@ -323,6 +333,23 @@ mod tests {
             }
             k => panic!("{k:?}"),
         }
+        assert_eq!(out[2].ts - out[0].ts, 60.0);
+    }
+
+    #[test]
+    fn a_response_split_at_reasoning_ends_the_turn_only_after_its_last_chunk() {
+        let think = r#"{"type":"assistant.message","timestamp":"2026-11-19T10:00:02Z","data":{"messageId":"m0","content":"","reasoningText":"Let me look.","chunkIndex":0,"chunkCount":2}}"#;
+        let ask = ASK.replace(r#""messageId":"m1","#, r#""messageId":"m1","chunkIndex":1,"chunkCount":2,"#);
+        let out = run(&[START, USER, think, &ask, TOOL, DONE_TOOL, FINAL]);
+        assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
+        assert!(matches!(out[2].kind, Kind::ReplyDone { reply_words: 7, tools: 1, .. }));
+        assert_eq!(out[2].ts - out[0].ts, 60.0);
+
+        // Tools asked for in an early chunk still keep the turn open.
+        let ask = ASK.replace(r#""messageId":"m1","#, r#""messageId":"m1","chunkIndex":0,"chunkCount":2,"#);
+        let say = r#"{"type":"assistant.message","timestamp":"2026-11-19T10:00:03Z","data":{"messageId":"m1b","content":"Editing now.","chunkIndex":1,"chunkCount":2}}"#;
+        let out = run(&[START, USER, &ask, say, TOOL, DONE_TOOL, FINAL]);
+        assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
         assert_eq!(out[2].ts - out[0].ts, 60.0);
     }
 
