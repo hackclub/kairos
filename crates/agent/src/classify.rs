@@ -57,7 +57,7 @@ pub fn normalize(name: &str) -> String {
     }
 }
 
-fn is_one_of(set: &[&str], name: &str) -> bool {
+pub(crate) fn is_one_of(set: &[&str], name: &str) -> bool {
     !name.is_empty()
         && set.iter().any(|b| {
             name == *b
@@ -180,6 +180,11 @@ impl Tree {
 
     pub fn show(&mut self, owner: u32, pids: &[u32]) {
         self.children.insert(owner, pids.iter().copied().filter(|p| *p != owner).collect());
+    }
+
+    #[cfg(unix)]
+    pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ppid.keys().copied()
     }
 
     pub fn parent(&self, pid: u32) -> Option<u32> {

@@ -2,14 +2,15 @@
 //! on Linux) and don't say which of their shells a window shows. Each shell reads its own terminal device, and the
 //! system moves the device's access time when it does, so the device that moves while someone types in a window is
 //! that window's. A window is learned the first time someone types in it and shows none of the terminal's sessions
-//! until then.
+//! until then. A tmux, zellij or screen client in a window shows panes that run under the multiplexer's server, away
+//! from the terminal, and those panes are learned the same way.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::classify::{is_terminal, Procs};
+use crate::classify::{is_one_of, is_terminal, Procs};
 use crate::now;
 use crate::platform::Foreground;
 
@@ -21,10 +22,41 @@ const IDLE: Duration = Duration::from_secs(3600);
 // switch.
 const SETTLE: f64 = 2.0;
 const MAX_LEARNED: usize = 256;
+const MULTIPLEXERS: &[&str] = &["tmux", "zellij", "screen"];
 
 /// The terminal devices a terminal's windows run, each with the topmost processes on it. A program inside a shell that
-/// opens a terminal of its own (`script`, an agent's pty) stays part of that shell's session.
-pub fn sessions<P: Procs>(p: &P, owner: u32) -> Vec<(u64, Vec<u32>)> {
+/// opens a terminal of its own (`script`, an agent's pty) stays part of that shell's session. A window running a
+/// multiplexer's client shows one of its server's panes, so every pane of that multiplexer stands in for the window's
+/// own device, and the flag says so.
+pub fn sessions<P: Procs>(p: &P, owner: u32) -> (Vec<(u64, Vec<u32>)>, bool) {
+    let (mut out, on) = devices(p, owner);
+    let clients: Vec<(u64, &str)> = on.iter().filter_map(|(&pid, &tty)| Some((tty, multiplexer(&p.name(pid))?))).collect();
+    if clients.is_empty() {
+        return (out, false);
+    }
+    // A server leaves the terminal it was started from.
+    let mut servers: Vec<u32> = p
+        .tree()
+        .pids()
+        .filter(|&pid| multiplexer(&p.name(pid)).is_some_and(|m| clients.iter().any(|(_, c)| *c == m)) && p.tty(pid).is_none())
+        .collect();
+    if servers.is_empty() {
+        return (out, false);
+    }
+    servers.sort_unstable();
+    out.retain(|(tty, _)| !clients.iter().any(|(t, _)| t == tty));
+    for server in servers {
+        for (tty, tops) in devices(p, server).0 {
+            if !out.iter().any(|(t, _)| *t == tty) {
+                out.push((tty, tops));
+            }
+        }
+    }
+    (out, true)
+}
+
+/// The sessions under `owner`, and the device of every process in one.
+fn devices<P: Procs>(p: &P, owner: u32) -> (Vec<(u64, Vec<u32>)>, HashMap<u32, u64>) {
     let mut on: HashMap<u32, Option<u64>> = HashMap::from([(owner, None)]);
     let mut out: Vec<(u64, Vec<u32>)> = Vec::new();
     for (pid, _) in p.tree().descendants(owner) {
@@ -39,7 +71,11 @@ pub fn sessions<P: Procs>(p: &P, owner: u32) -> Vec<(u64, Vec<u32>)> {
         });
         on.insert(pid, session);
     }
-    out
+    (out, on.into_iter().filter_map(|(pid, tty)| Some((pid, tty?))).collect())
+}
+
+fn multiplexer(name: &str) -> Option<&'static str> {
+    MULTIPLEXERS.iter().copied().find(|m| is_one_of(&[m], name))
 }
 
 pub fn secs(t: SystemTime) -> Option<f64> {
@@ -113,11 +149,11 @@ fn run<P: Procs>(rx: &Receiver<Option<Foreground>>, out: &Sender<Option<Foregrou
     let mut current: Option<Foreground> = None;
     let mut sent: Option<Foreground> = None;
     // Whether the app in front is a terminal, and its sessions when it is.
-    let mut seen: Option<(bool, Vec<(u64, Vec<u32>)>)> = None;
+    let mut seen: Option<(bool, Vec<(u64, Vec<u32>)>, bool)> = None;
     let mut polls = 0;
     let mut last = now();
     loop {
-        let terminal = seen.as_ref().is_some_and(|(t, _)| *t);
+        let terminal = seen.as_ref().is_some_and(|(t, ..)| *t);
         match rx.recv_timeout(if terminal { POLL } else { IDLE }) {
             Ok(fg) => {
                 current = fg;
@@ -135,17 +171,25 @@ fn run<P: Procs>(rx: &Receiver<Option<Foreground>>, out: &Sender<Option<Foregrou
             if seen.is_none() || polls % RESCAN == 0 {
                 let p = (hooks.scan)();
                 let terminal = is_terminal(&p.name(fg.pid), &fg.wclass);
-                seen = Some((terminal, if terminal { sessions(&p, fg.pid) } else { Vec::new() }));
+                seen = Some(if terminal {
+                    let (sessions, away) = sessions(&p, fg.pid);
+                    (true, sessions, away)
+                } else {
+                    (false, Vec::new(), false)
+                });
             }
-            let Some((true, sessions)) = &seen else { return fg };
+            let Some((true, sessions, away)) = &seen else { return fg };
             let ttys: Vec<(u64, Option<f64>)> = sessions.iter().map(|(t, _)| (*t, (hooks.atime)(*t))).collect();
             let at = now();
             learner.poll(fg.pid, fg.window, (hooks.typed)(at - last), &ttys);
             last = at;
-            if sessions.len() < 2 {
+            if sessions.len() < 2 && !away {
                 return fg;
             }
-            let shown = learner.shown(fg.pid, fg.window).and_then(|t| sessions.iter().find(|(d, _)| *d == t));
+            let shown = match &sessions[..] {
+                [only] => Some(only),
+                _ => learner.shown(fg.pid, fg.window).and_then(|t| sessions.iter().find(|(d, _)| *d == t)),
+            };
             Foreground { sessions: shown.map_or_else(|| vec![fg.pid], |(_, tops)| tops.clone()), ..fg }
         });
         if fg != sent {
@@ -260,6 +304,7 @@ mod tests {
     struct Fake {
         tree: Tree,
         ttys: HashMap<u32, u64>,
+        names: HashMap<u32, &'static str>,
     }
 
     impl Procs for Fake {
@@ -268,7 +313,7 @@ mod tests {
             &self.tree
         }
         fn name(&self, pid: u32) -> String {
-            if pid == OWNER { "gnome-terminal-server".into() } else { String::new() }
+            if pid == OWNER { "gnome-terminal-server".into() } else { self.names.get(&pid).copied().unwrap_or_default().into() }
         }
         fn exe(&self, _pid: u32) -> Option<PathBuf> {
             None
@@ -292,8 +337,49 @@ mod tests {
             tree.insert(pid, parent);
         }
         let ttys = HashMap::from([(21, T1), (22, T1), (23, 9999), (31, T2), (30, T2)]);
-        let got = sessions(&Fake { tree, ttys }, OWNER);
-        assert_eq!(got, vec![(T2, vec![30]), (T1, vec![21])]);
+        let got = sessions(&Fake { tree, ttys, names: HashMap::new() }, OWNER);
+        assert_eq!(got, (vec![(T2, vec![30]), (T1, vec![21])], false));
+    }
+
+    const T3: u64 = 7003;
+    const T4: u64 = 7004;
+
+    // One window runs a tmux client (21) on T1, another a shell on T2. The tmux server (50) left the terminal and runs
+    // a pane on T3 with an agent in it and one on T4. A screen server (70) has a pane too, but no window shows screen.
+    fn tmux_windows() -> Fake {
+        let mut tree = Tree::default();
+        for (pid, parent) in [(20, OWNER), (21, 20), (30, OWNER), (50, 1), (51, 50), (52, 51), (60, 50), (70, 1), (71, 70)] {
+            tree.insert(pid, parent);
+        }
+        let ttys = HashMap::from([(20, T1), (21, T1), (30, T2), (51, T3), (52, T3), (60, T4), (71, 7005)]);
+        let names = HashMap::from([(21, "tmux"), (50, "tmux"), (52, "claude"), (70, "screen")]);
+        Fake { tree, ttys, names }
+    }
+
+    #[test]
+    fn a_window_running_tmux_shows_the_servers_panes() {
+        let got = sessions(&tmux_windows(), OWNER);
+        assert_eq!(got, (vec![(T2, vec![30]), (T3, vec![51]), (T4, vec![60])], true));
+    }
+
+    fn one_tmux_pane() -> Fake {
+        let mut tree = Tree::default();
+        for (pid, parent) in [(20, OWNER), (21, 20), (50, 1), (51, 50), (52, 51)] {
+            tree.insert(pid, parent);
+        }
+        let ttys = HashMap::from([(20, T1), (21, T1), (51, T3), (52, T3)]);
+        let names = HashMap::from([(21, "tmux"), (50, "tmux"), (52, "claude")]);
+        Fake { tree, ttys, names }
+    }
+
+    #[test]
+    fn a_window_with_the_only_tmux_pane_shows_it_without_typing() {
+        let (out, reports) = channel();
+        let tx = spawn(out, Hooks { scan: one_tmux_pane, atime: |_| None, typed: |_| false });
+        let fg = Foreground { pid: OWNER, wclass: String::new(), title: String::new(), sessions: Vec::new(), window: W1 };
+        tx.send(Some(fg)).unwrap();
+        let first = reports.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(first.sessions, vec![51]);
     }
 
     fn poll(l: &mut Learner, window: u64, typed: bool, t1: f64, t2: f64) {
@@ -401,7 +487,7 @@ mod tests {
         let mut tree = Tree::default();
         tree.insert(20, OWNER);
         tree.insert(30, OWNER);
-        Fake { tree, ttys: HashMap::from([(20, T1), (30, T2)]) }
+        Fake { tree, ttys: HashMap::from([(20, T1), (30, T2)]), names: HashMap::new() }
     }
 
     fn time_of(tty: u64) -> Option<f64> {
