@@ -50,6 +50,7 @@ struct Sess {
     session: String,
     cwd: Option<PathBuf>,
     model: Option<String>,
+    version: Option<String>,
     armed: bool,
     open: bool,
     last_ts: f64,
@@ -81,6 +82,9 @@ impl Sess {
         }
         if let Some(c) = d.pointer("/context/cwd").or_else(|| d.get("cwd")).and_then(Value::as_str) {
             self.cwd = Some(PathBuf::from(c));
+        }
+        if let Some(v) = d.get("copilotVersion").and_then(Value::as_str) {
+            self.version = Some(v.to_string());
         }
     }
 
@@ -184,7 +188,7 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
                     model: s.model.clone(),
                     session: s.session.clone(),
                     shape: Some(prompt_shape(text)),
-                    version: None,
+                    version: s.version.clone(),
                     via: None,
                 },
             });
@@ -312,7 +316,7 @@ mod tests {
         let out = run(&[START, MODEL, USER, ASK, TOOL, DONE_TOOL, SUB, SUB_SAY, FINAL]);
         assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/w/p")));
-        assert!(matches!(&out[0].kind, Kind::Prompt { words: 7, model: Some(m), .. } if m == "gpt-x"));
+        assert!(matches!(&out[0].kind, Kind::Prompt { words: 7, model: Some(m), version: Some(v), .. } if m == "gpt-x" && v == "1.0.62"));
         match &out[2].kind {
             Kind::ReplyDone { reply_words, tools, files_changed, .. } => {
                 assert_eq!((*reply_words, *tools, *files_changed), (7, 1, 1));
