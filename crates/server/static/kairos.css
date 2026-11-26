@@ -284,6 +284,219 @@ section h2 {
   margin-top: 10px;
 }
 
+.days.pickable div {
+  cursor: pointer;
+}
+
+.days.dim div {
+  opacity: .28;
+}
+
+.days.dim div.on {
+  opacity: 1;
+}
+
+.dates {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 20px;
+  margin-top: 28px;
+}
+
+.dates .seg {
+  margin-top: 0;
+}
+
+.dates .total {
+  margin: 0 0 0 auto;
+  color: var(--soft);
+}
+
+.dates .total b {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.pick {
+  --pxc: var(--edge);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+  padding: 10px 16px;
+  background: var(--card);
+  color: var(--ink);
+  border: 0;
+  cursor: pointer;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pick svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  fill: currentColor;
+}
+
+.pick .caret {
+  width: 10px;
+  height: 6px;
+  margin-left: auto;
+}
+
+.cal {
+  --pxc: var(--edge);
+  position: absolute;
+  top: calc(100% + 14px);
+  left: 0;
+  z-index: 20;
+  width: min(340px,calc(100vw - 46px));
+  background: var(--card);
+  padding: 16px 18px 18px;
+}
+
+.cal[hidden] {
+  display: none;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cal-head b {
+  font: 700 18px/1 'Funnel Display',sans-serif;
+  letter-spacing: -.01em;
+}
+
+.cal-head button {
+  background: none;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 6px 10px;
+  font: 600 18px/1 'IBM Plex Mono',monospace;
+}
+
+.cal-head button:disabled {
+  color: var(--line);
+  cursor: default;
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7,minmax(0,1fr));
+  gap: 3px;
+}
+
+.cal-grid .dow {
+  text-align: center;
+  font: 400 12px/1 'IBM Plex Mono',monospace;
+  color: var(--soft);
+  padding: 4px 0 8px;
+}
+
+.cal-grid button {
+  position: relative;
+  aspect-ratio: 1;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 0 6px;
+}
+
+.cal-grid button:hover:not(:disabled) {
+  background: var(--tint);
+}
+
+.cal-grid button:disabled {
+  color: var(--line);
+  cursor: default;
+}
+
+.cal-grid i {
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+}
+
+.cal-grid .h1 {
+  background: var(--h1);
+}
+
+.cal-grid .h2 {
+  background: var(--h2);
+}
+
+.cal-grid .h3 {
+  background: var(--h3);
+}
+
+.cal-grid .h4 {
+  background: var(--h4);
+}
+
+.cal-grid .today {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.cal-grid .in {
+  background: var(--h1);
+}
+
+.cal-grid .end,
+.cal-grid .end:hover:not(:disabled) {
+  background: var(--btn);
+  color: var(--btn-ink);
+}
+
+.cal-grid .end i {
+  background: var(--btn-ink);
+}
+
+.cal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin-top: 14px;
+  font-size: 14px;
+  color: var(--soft);
+}
+
+.cal-foot .link {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  padding: 4px 0;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  cursor: pointer;
+}
+
+.dates + .boxes > section:first-child {
+  margin-top: 36px;
+}
+
+.boxes.loading {
+  opacity: .5;
+  transition: opacity .15s;
+}
+
 .rows {
   list-style: none;
   margin: 0;
@@ -1375,6 +1588,15 @@ p code {
 }
 
 @media (max-width:600px) {
+  .dates .total {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .pick {
+    width: calc(100% - 6px);
+  }
+
   .setup li {
     padding-left: 0;
   }

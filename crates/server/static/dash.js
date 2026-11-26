@@ -202,9 +202,191 @@
     }
   }
 
+  function datePicker() {
+    const $ = (id) => document.getElementById(id);
+    const parse = (s) => {
+      const [y, m, d] = s.split('-').map(Number);
+      return new Date(y, m - 1, d);
+    };
+    const pad = (n) => String(n).padStart(2, '0');
+    const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    let mode = 'day';
+    let anchor = null;
+    let hover = null;
+    let month;
+    let secs = {};
+    let max = 0;
+    let seq = 0;
+
+    function human(s) {
+      const m = Math.round(s / 60);
+      const h = Math.floor(m / 60);
+      if (m === 0) return s > 0 ? 'under 1 min' : '0 min';
+      if (h === 0) return `${m} min`;
+      return m % 60 ? `${h} hr ${m % 60} min` : `${h} hr`;
+    }
+
+    function info() {
+      const data = $('dates').dataset;
+      return { from: parse(data.from), to: parse(data.to), today: parse(data.today), start: parse(data.start) };
+    }
+
+    // Swaps in the same page for the new dates, so the dial and scroll position stay put.
+    async function go(url) {
+      const n = ++seq;
+      $('boxes').classList.add('loading');
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(String(res.status));
+        const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+        if (n !== seq) return;
+        const parts = ['days', 'dates', 'boxes'].map((id) => [$(id), doc.getElementById(id)]);
+        if (parts.some(([, fresh]) => !fresh)) throw new Error('not the dashboard');
+        const refocus = $('dates').contains(document.activeElement);
+        parts.forEach(([old, fresh]) => old.replaceWith(fresh));
+        if (refocus) $('pick').focus();
+        history.replaceState(null, '', url);
+      } catch {
+        location.href = url;
+      }
+    }
+
+    function pick(a, b) {
+      const [lo, hi] = a <= b ? [a, b] : [b, a];
+      closeCal();
+      go(`/me?from=${iso(lo)}&to=${iso(hi)}`);
+    }
+
+    function paint() {
+      let { from: lo, to: hi } = info();
+      if (mode === 'range') {
+        lo = hi = anchor;
+        if (anchor && hover) [lo, hi] = hover < anchor ? [hover, anchor] : [anchor, hover];
+      }
+      const today = +info().today;
+      $('cal-days').querySelectorAll('button').forEach((button) => {
+        const d = parse(button.dataset.day);
+        const inside = !!lo && d >= lo && d <= hi;
+        const end = inside && (+d === +lo || +d === +hi);
+        button.classList.toggle('today', +d === today);
+        button.classList.toggle('end', end);
+        button.classList.toggle('in', inside && !end);
+      });
+      $('cal-hint').textContent = mode === 'range' ? (anchor ? 'Pick the last day' : 'Pick the first day') : '';
+      $('cal-mode').textContent = mode === 'range' ? 'Pick one day' : 'Pick a range';
+    }
+
+    function draw() {
+      const { today, start } = info();
+      $('cal-month').textContent = month.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      $('cal-prev').disabled = month <= new Date(start.getFullYear(), start.getMonth(), 1);
+      $('cal-next').disabled = month >= new Date(today.getFullYear(), today.getMonth(), 1);
+      let html = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((d) => `<span class="dow">${d}</span>`).join('');
+      html += '<span></span>'.repeat((month.getDay() + 6) % 7);
+      const last = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+      for (let n = 1; n <= last; n++) {
+        const d = new Date(month.getFullYear(), month.getMonth(), n);
+        const off = d > today || d < start;
+        const v = secs[iso(d)] || 0;
+        const level = v > 0 && max > 0 ? Math.min(4, Math.max(1, Math.ceil((v / max) * 4))) : 0;
+        html += `<button type="button" data-day="${iso(d)}"${off ? ' disabled' : ` title="${human(v)}"`}>${n}${level ? `<i class="h${level}"></i>` : ''}</button>`;
+      }
+      $('cal-days').innerHTML = html;
+      paint();
+    }
+
+    function openCal() {
+      try {
+        secs = JSON.parse($('cal-data').textContent);
+      } catch {
+        secs = {};
+      }
+      max = Math.max(0, ...Object.values(secs));
+      mode = 'day';
+      anchor = hover = null;
+      const { to } = info();
+      month = new Date(to.getFullYear(), to.getMonth(), 1);
+      $('cal').hidden = false;
+      $('pick').setAttribute('aria-expanded', 'true');
+      draw();
+      const first = $('cal-days').querySelector('.end') || $('cal-days').querySelector('button:not(:disabled)');
+      if (first) first.focus();
+    }
+
+    function closeCal() {
+      if ($('cal').hidden) return;
+      $('cal').hidden = true;
+      $('pick').setAttribute('aria-expanded', 'false');
+    }
+
+    document.addEventListener('click', (e) => {
+      const t = e.target;
+      const path = e.composedPath();
+      if (!path.includes($('cal')) && !path.includes($('pick'))) closeCal();
+      if (t.closest('#pick')) {
+        if ($('cal').hidden) openCal();
+        else closeCal();
+        return;
+      }
+      const chip = t.closest('#dates .seg a');
+      if (chip) {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        go(chip.getAttribute('href'));
+        return;
+      }
+      const bar = t.closest('#days div[data-day]');
+      if (bar) {
+        const d = parse(bar.dataset.day);
+        pick(d, d);
+        return;
+      }
+      if (t.closest('#cal-prev') || t.closest('#cal-next')) {
+        month = new Date(month.getFullYear(), month.getMonth() + (t.closest('#cal-prev') ? -1 : 1), 1);
+        draw();
+        return;
+      }
+      if (t.closest('#cal-mode')) {
+        mode = mode === 'day' ? 'range' : 'day';
+        anchor = hover = null;
+        paint();
+        return;
+      }
+      const day = t.closest('#cal-days button');
+      if (!day || day.disabled) return;
+      const d = parse(day.dataset.day);
+      if (mode === 'day') {
+        pick(d, d);
+      } else if (!anchor) {
+        anchor = d;
+        paint();
+      } else {
+        pick(anchor, d);
+      }
+    });
+
+    document.addEventListener('mouseover', (e) => {
+      if (mode !== 'range' || !anchor || $('cal').hidden) return;
+      const day = e.target.closest('#cal-days button');
+      const next = day && !day.disabled ? parse(day.dataset.day) : null;
+      if (+next !== +hover) {
+        hover = next;
+        paint();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !$('cal').hidden) {
+        closeCal();
+        $('pick').focus();
+      }
+    });
+  }
+
   const box = document.getElementById('dialbox');
   const snapEl = document.getElementById('snap');
   if (box && snapEl) dashboard(box, snapEl);
+  if (document.getElementById('dates')) datePicker();
 
   document.querySelectorAll('.heat').forEach((heat) => {
     heat.scrollLeft = heat.scrollWidth;

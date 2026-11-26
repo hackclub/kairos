@@ -1,28 +1,55 @@
 {% import "macros.html" as m %}
 <section>
   <h2>Last 30 days</h2>
-  <div class="days">
+  <div class="days{% if let Some(p) = summary.picker %} pickable{% if p.preset != "month" %} dim{% endif %}{% endif %}" id="days">
     {% for d in summary.days %}
-      <div title="{{ d.title }}" style="height:{{ d.pct }}%"></div>
+      <div title="{{ d.title }}" style="height:{{ d.pct }}%"{% if summary.picker.is_some() %} data-day="{{ d.day }}"{% if d.on %} class="on"{% endif %}{% endif %}></div>
     {% endfor %}
   </div>
   <div class="axis"><span>{{ summary.first_label }}</span><span>today</span></div>
 </section>
-<section class="grid2">
-  {% call m::rows("Projects", summary.projects) %}{% endcall %}
-  {% call m::rows("Kind of work", summary.classes) %}{% endcall %}
-</section>
-{% if tools.is_some() || !summary.languages.is_empty() %}
-  <section class="grid2">
-    {% if let Some(t) = tools %}
-      {% call m::rows("AI tools", t) %}{% endcall %}
-    {% else %}
-      <div></div>
-    {% endif %}
-    {% if !summary.languages.is_empty() %}
-      {% call m::rows("Languages", summary.languages) %}{% endcall %}
-    {% else %}
-      <div></div>
-    {% endif %}
-  </section>
+{% if let Some(p) = summary.picker %}
+  <div class="dates" id="dates" data-from="{{ p.from }}" data-to="{{ p.to }}" data-today="{{ p.today }}" data-start="{{ p.start }}">
+    <button type="button" class="pick px" id="pick" aria-haspopup="dialog" aria-expanded="false">
+      <svg viewBox="0 0 9 9" shape-rendering="crispEdges" aria-hidden="true"><rect x="0" y="1" width="9" height="2"/><rect x="0" y="3" width="1" height="6"/><rect x="8" y="3" width="1" height="6"/><rect x="0" y="8" width="9" height="1"/><rect x="2" y="0" width="1" height="2"/><rect x="6" y="0" width="1" height="2"/><rect x="2" y="5" width="2" height="2"/></svg>
+      <span>{{ p.label }}</span>
+      <svg class="caret" viewBox="0 0 5 3" shape-rendering="crispEdges" aria-hidden="true"><rect x="0" y="0" width="5" height="1"/><rect x="1" y="1" width="3" height="1"/><rect x="2" y="2" width="1" height="1"/></svg>
+    </button>
+    <nav class="seg" aria-label="Dates">
+      <a href="/me?from={{ p.today }}&amp;to={{ p.today }}"{% if p.preset == "today" %} aria-current="true"{% endif %}>Today</a>
+      <a href="/me?from={{ p.week }}&amp;to={{ p.today }}"{% if p.preset == "week" %} aria-current="true"{% endif %}>This week</a>
+      <a href="/me"{% if p.preset == "month" %} aria-current="true"{% endif %}>Last 30 days</a>
+    </nav>
+    <p class="total"><b>{{ p.total }}</b> focus time</p>
+    <div class="cal px" id="cal" role="dialog" aria-label="Pick dates" hidden>
+      <div class="cal-head">
+        <button type="button" id="cal-prev" aria-label="Previous month">‹</button>
+        <b id="cal-month"></b>
+        <button type="button" id="cal-next" aria-label="Next month">›</button>
+      </div>
+      <div class="cal-grid" id="cal-days"></div>
+      <div class="cal-foot"><span id="cal-hint"></span><button type="button" class="link" id="cal-mode"></button></div>
+    </div>
+    <script type="application/json" id="cal-data">{{ p.json|safe }}</script>
+  </div>
 {% endif %}
+<div class="boxes" id="boxes">
+  <section class="grid2">
+    {% call m::rows("Projects", summary.projects) %}{% endcall %}
+    {% call m::rows("Kind of work", summary.classes) %}{% endcall %}
+  </section>
+  {% if tools.is_some() || !summary.languages.is_empty() %}
+    <section class="grid2">
+      {% if let Some(t) = tools %}
+        {% call m::rows("AI tools", t) %}{% endcall %}
+      {% else %}
+        <div></div>
+      {% endif %}
+      {% if !summary.languages.is_empty() %}
+        {% call m::rows("Languages", summary.languages) %}{% endcall %}
+      {% else %}
+        <div></div>
+      {% endif %}
+    </section>
+  {% endif %}
+</div>

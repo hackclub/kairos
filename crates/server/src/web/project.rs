@@ -171,6 +171,8 @@ pub async fn page(State(st): State<St>, ctx: Ctx, Path((username, project)): Pat
             DayBar {
                 title: format!("{} · {}", d.format("%a %b %-d"), human(v)),
                 pct: format!("{:.1}", if max > 0.0 { v / max * 100.0 } else { 0.0 }),
+                day: d.to_string(),
+                on: false,
             }
         })
         .collect();

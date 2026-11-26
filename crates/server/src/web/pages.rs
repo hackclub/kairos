@@ -4,7 +4,7 @@ use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use chrono::{Days, NaiveDate};
+use chrono::{Datelike, Days, NaiveDate};
 use kairos_core::union;
 use serde::Deserialize;
 
@@ -30,6 +30,8 @@ pub struct Row {
 pub struct DayBar {
     pub title: String,
     pub pct: String,
+    pub day: String,
+    pub on: bool,
 }
 
 pub struct Summary {
@@ -38,6 +40,20 @@ pub struct Summary {
     pub projects: Vec<Row>,
     pub classes: Vec<Row>,
     pub languages: Vec<Row>,
+    pub picker: Option<Picker>,
+}
+
+/// The dashboard's date picker. The calendar gets every day's focus seconds, keyed by date.
+pub struct Picker {
+    pub label: String,
+    pub total: String,
+    pub preset: &'static str,
+    pub from: String,
+    pub to: String,
+    pub today: String,
+    pub week: String,
+    pub start: String,
+    pub json: String,
 }
 
 pub fn kind(class: &str) -> (&'static str, &'static str) {
@@ -78,40 +94,76 @@ fn sorted(m: BTreeMap<String, f64>) -> Vec<(String, f64)> {
     v
 }
 
-pub struct DayRow {
-    pub day: NaiveDate,
-    pub project: String,
-    pub class: String,
-    pub seconds: f64,
+/// Missing or unreadable dates fall back to the last 30 days. Days after today are cut.
+fn picked(from: Option<&str>, to: Option<&str>, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let parse = |d: Option<&str>| d.and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).map(|d| d.min(today));
+    match (parse(from), parse(to)) {
+        (Some(a), Some(b)) => (a.min(b), a.max(b)),
+        _ => (today.checked_sub_days(Days::new(29)).unwrap_or(today), today),
+    }
 }
 
-pub async fn user_days(st: &St, user_id: i64, from: NaiveDate) -> Res<Vec<DayRow>> {
+fn range_label(from: NaiveDate, to: NaiveDate, today: NaiveDate) -> String {
+    let this_year = from.year() == today.year() && to.year() == today.year();
+    let (day, span) = if this_year { ("%a, %b %-d", "%b %-d") } else { ("%a, %b %-d, %Y", "%b %-d, %Y") };
+    if from == to {
+        from.format(day).to_string()
+    } else {
+        format!("{} \u{2013} {}", from.format(span), to.format(span))
+    }
+}
+
+fn preset(from: NaiveDate, to: NaiveDate, today: NaiveDate) -> &'static str {
+    let ago = |n| today.checked_sub_days(Days::new(n));
+    if to != today {
+        ""
+    } else if from == today {
+        "today"
+    } else if Some(from) == ago(6) {
+        "week"
+    } else if Some(from) == ago(29) {
+        "month"
+    } else {
+        ""
+    }
+}
+
+/// Hidden projects fold into one row for visitors; Other is its own row. The 30 day chart
+/// always ends today; with `pick` the rows cover the picked days and the page gets a picker.
+async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>, pick: Option<(NaiveDate, NaiveDate)>) -> Res<Summary> {
+    let month = today.checked_sub_days(Days::new(29)).unwrap_or(today);
+    let (from, to) = pick.unwrap_or((month, today));
     let c = st.pool.get().await?;
-    let rows = c
-        .query("SELECT day, project, class, seconds FROM user_days WHERE user_id = $1 AND day >= $2", &[&user_id, &from])
-        .await?;
-    Ok(rows.iter().map(|r| DayRow { day: r.get(0), project: r.get(1), class: r.get(2), seconds: r.get(3) }).collect())
-}
-
-/// Hidden projects fold into one row for visitors; Other is its own row.
-async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>) -> Res<Summary> {
-    let first = today.checked_sub_days(Days::new(29)).unwrap_or(today);
-    let data = user_days(st, u.id, first).await?;
-    let mut per_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    let per_day: BTreeMap<NaiveDate, f64> = c
+        .query(
+            "SELECT day, sum(seconds)::float8 FROM user_days WHERE user_id = $1 AND ($2::date IS NULL OR day >= $2) AND class <> 'agent' GROUP BY day",
+            &[&u.id, &if pick.is_some() { None } else { Some(month) }],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
     let mut projects: BTreeMap<String, f64> = BTreeMap::new();
     let mut classes: BTreeMap<String, f64> = BTreeMap::new();
-    for r in data.iter().filter(|r| r.class != "agent") {
-        *per_day.entry(r.day).or_default() += r.seconds;
-        let label = if r.project.is_empty() {
+    let picked_rows = c
+        .query(
+            "SELECT project, class, sum(seconds)::float8 FROM user_days WHERE user_id = $1 AND day >= $2 AND day <= $3 AND class <> 'agent' GROUP BY 1, 2",
+            &[&u.id, &from, &to],
+        )
+        .await?;
+    for r in &picked_rows {
+        let (project, class, secs): (String, String, f64) = (r.get(0), r.get(1), r.get(2));
+        let label = if project.is_empty() {
             "Other".to_string()
-        } else if hidden.contains(&r.project) {
+        } else if hidden.contains(&project) {
             "Private projects".to_string()
         } else {
-            r.project.clone()
+            project
         };
-        *projects.entry(label).or_default() += r.seconds;
-        *classes.entry(r.class.clone()).or_default() += r.seconds;
+        *projects.entry(label).or_default() += secs;
+        *classes.entry(class).or_default() += secs;
     }
+    drop(c);
     let dates: Vec<NaiveDate> = (0..30).rev().filter_map(|i| today.checked_sub_days(Days::new(i))).collect();
     let max = dates.iter().filter_map(|d| per_day.get(d)).copied().fold(0.0, f64::max);
     let days = dates
@@ -121,14 +173,37 @@ async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>) 
             DayBar {
                 title: format!("{} · {}", d.format("%a %b %-d"), human(v)),
                 pct: format!("{:.1}", if max > 0.0 { v / max * 100.0 } else { 0.0 }),
+                day: d.to_string(),
+                on: pick.is_some() && (from..=to).contains(d),
             }
         })
         .collect();
     let tz = u.tz();
-    let (lo, hi) = (day_start(tz, first), now() + 60.0);
+    let lo = day_start(tz, from);
+    let hi = match to.succ_opt() {
+        Some(next) if to < today => day_start(tz, next),
+        _ => now() + 60.0,
+    };
     let spans = load_spans(st, u.id, lo, hi).await?;
     let credited = union(spans.iter().map(|s| (s.start, s.end)).collect());
     let langs = languages(st, u.id, &credited, lo, hi).await?;
+    let picker = match pick {
+        None => None,
+        Some(_) => {
+            let secs: BTreeMap<String, i64> = per_day.iter().filter(|d| *d.1 > 0.0).map(|(d, v)| (d.to_string(), v.round() as i64)).collect();
+            Some(Picker {
+                label: range_label(from, to, today),
+                total: human(per_day.range(from..=to).map(|d| d.1).sum()),
+                preset: preset(from, to, today),
+                from: from.to_string(),
+                to: to.to_string(),
+                today: today.to_string(),
+                week: today.checked_sub_days(Days::new(6)).unwrap_or(today).to_string(),
+                start: per_day.keys().next().unwrap_or(&today).min(&today).to_string(),
+                json: serde_json::to_string(&secs)?,
+            })
+        }
+    };
     Ok(Summary {
         days,
         first_label: dates.first().map(|d| d.format("%b %-d").to_string()).unwrap_or_default(),
@@ -146,6 +221,7 @@ async fn summary(st: &St, u: &User, today: NaiveDate, hidden: &HashSet<String>) 
             |_| None,
         ),
         languages: rows(langs, |_| None, |_| None),
+        picker,
     })
 }
 
@@ -262,14 +338,13 @@ pub fn ago(secs: f64) -> String {
     }
 }
 
-async fn tools(st: &St, user_id: i64, today: NaiveDate) -> Res<Vec<Row>> {
-    let from = today.checked_sub_days(Days::new(29)).unwrap_or(today);
+async fn tools(st: &St, user_id: i64, from: NaiveDate, to: NaiveDate) -> Res<Vec<Row>> {
     let c = st.pool.get().await?;
     let list: Vec<(String, f64)> = c
         .query(
             "SELECT harness, sum(prompts)::float8 FROM user_tool_days WHERE user_id = $1 AND day >= $2 AND day <= $3
              GROUP BY harness ORDER BY 2 DESC, 1 LIMIT 12",
-            &[&user_id, &from, &today],
+            &[&user_id, &from, &to],
         )
         .await?
         .iter()
@@ -304,11 +379,13 @@ struct Me {
     connected: Option<&'static str>,
 }
 
-/// Where `kairos login` sends the browser once the computer is connected.
 #[derive(Deserialize)]
 pub struct MeQ {
+    /// Where `kairos login` sends the browser once the computer is connected.
     connected: Option<String>,
     hackatime: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
 }
 
 pub async fn me(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(q): Query<MeQ>) -> Res<Response> {
@@ -317,8 +394,9 @@ pub async fn me(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(q):
     let all = total_since(&st, u.id, None).await?;
     let snap = live::snapshot(&st, u).await?;
     let snap_json = serde_json::to_string(&snap)?.replace("</", "<\\/");
-    let summary = summary(&st, u, today, &HashSet::new()).await?;
-    let tools = tools(&st, u.id, today).await?;
+    let (from, to) = picked(q.from.as_deref(), q.to.as_deref(), today);
+    let summary = summary(&st, u, today, &HashSet::new(), Some((from, to))).await?;
+    let tools = tools(&st, u.id, from, to).await?;
 
     let c = st.pool.get().await?;
     let timezone_set: bool = c.query_one("SELECT timezone_set FROM users WHERE id = $1", &[&u.id]).await?.get(0);
@@ -391,14 +469,15 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, Path(username): Path<String
     let hidden = if own { HashSet::new() } else { hidden_projects(&st, u.id).await? };
     let today = local_day(u.tz(), now());
     let all = total_since(&st, u.id, None).await?;
-    let summary = summary(&st, &u, today, &hidden).await?;
+    let summary = summary(&st, &u, today, &hidden, None).await?;
     let days = live::week(&st, u.id, today).await?;
     let week: f64 = days.iter().map(|d| d.1).sum();
     let streak = {
         let c = st.pool.get().await?;
         streak::current(&c, u.id, today).await?
     };
-    let tools = if u.show_ai_tools || own { Some(tools(&st, u.id, today).await?) } else { None };
+    let month = today.checked_sub_days(Days::new(29)).unwrap_or(today);
+    let tools = if u.show_ai_tools || own { Some(tools(&st, u.id, month, today).await?) } else { None };
     let since: String = st
         .pool
         .get()
@@ -434,7 +513,40 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, Path(username): Path<String
 
 #[cfg(test)]
 mod tests {
-    use super::backend_note;
+    use chrono::NaiveDate;
+
+    use super::{backend_note, picked, preset, range_label};
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn picked_dates_fall_back_to_thirty_days_and_stop_at_today() {
+        let today = d("2026-11-26");
+        assert_eq!(picked(None, None, today), (d("2026-10-28"), today));
+        assert_eq!(picked(Some("2026-11-20"), Some("nope"), today), (d("2026-10-28"), today));
+        assert_eq!(picked(Some("2026-11-20"), Some("2026-11-10"), today), (d("2026-11-10"), d("2026-11-20")));
+        assert_eq!(picked(Some("2026-11-20"), Some("2027-01-01"), today), (d("2026-11-20"), today));
+    }
+
+    #[test]
+    fn date_labels_name_the_year_only_when_it_is_not_this_one() {
+        let today = d("2026-11-26");
+        assert_eq!(range_label(today, today, today), "Thu, Nov 26");
+        assert_eq!(range_label(d("2026-11-15"), d("2026-11-22"), today), "Nov 15 \u{2013} Nov 22");
+        assert_eq!(range_label(d("2025-12-20"), d("2026-01-05"), today), "Dec 20, 2025 \u{2013} Jan 5, 2026");
+        assert_eq!(range_label(d("2025-03-04"), d("2025-03-04"), today), "Tue, Mar 4, 2025");
+    }
+
+    #[test]
+    fn quick_picks_only_light_up_when_they_end_today() {
+        let today = d("2026-11-26");
+        assert_eq!(preset(today, today, today), "today");
+        assert_eq!(preset(d("2026-11-20"), today, today), "week");
+        assert_eq!(preset(d("2026-10-28"), today, today), "month");
+        assert_eq!(preset(d("2026-10-28"), d("2026-11-25"), today), "");
+    }
 
     #[test]
     fn missing_backends_are_named_and_working_ones_are_quiet() {

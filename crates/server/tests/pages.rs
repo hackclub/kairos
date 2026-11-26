@@ -368,6 +368,16 @@ async fn a_busy_server_renders_its_pages() {
     let mut visitor = app.browser();
 
     shots.ok("me", &ada.get("/me").await);
+    let one_day = ada.get("/me?from=2026-06-02&to=2026-06-02").await;
+    shots.ok("me-one-day", &one_day);
+    assert!(one_day.body.contains("Tue, Jun 2"), "{}", one_day.body);
+    assert!(one_day.body.contains("/@ada/p/ada/site") && !one_day.body.contains("/@ada/p/ada/old"), "{}", one_day.body);
+    let range = ada.get("/me?from=2026-06-03&to=2026-06-02").await;
+    shots.ok("me-range", &range);
+    assert!(range.body.contains("Jun 2") && range.body.contains("\u{2013} Jun 3"), "{}", range.body);
+    let bad = ada.get("/me?from=nope&to=2026-06-02").await;
+    shots.ok("me-bad-dates", &bad);
+    assert!(bad.body.contains(r#"aria-current="true">Last 30 days"#), "{}", bad.body);
     app.exec("UPDATE users SET timezone_set = true WHERE username = 'ada'").await;
     shots.ok("me-timezone-set", &ada.get("/me").await);
     shots.ok("extension", &ada.get("/extension").await);
