@@ -17,7 +17,7 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: " two$"
+  ONLY: ""
   SYSTEMS: ""
   GITHUB_TOKEN: ${{ github.token }}
 jobs:

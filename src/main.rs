@@ -292,6 +292,9 @@ fn front(all: &[Value], harness: &str, class: &str, closed: &[(f64, f64)]) -> Ve
     let mut before = None;
     let focus: Vec<(f64, (Value, Value))> =
         all.iter().filter(|e| e["kind"] == "focus").map(|e| (e["ts"].as_f64().unwrap_or(0.0), (e["class"].clone(), e["project"].clone()))).collect();
+    // An app's window learns its project from the app's log, which kairosd reads every few seconds: in a new session
+    // that is the first prompt.
+    let from = if class == "agent_app" { from + LOOKS } else { from };
     for (ts, seen) in &focus {
         let away = closed.iter().any(|&(a, b)| (a..=b + LOOKS).contains(ts));
         if *ts <= from {
@@ -344,7 +347,8 @@ fn check_session(
         }
     }
     for (path, content) in files {
-        if fs::read_to_string(project.join(&path)).unwrap_or_default() != content {
+        // Some agents on Windows (Copilot CLI) write the lines with Windows line endings.
+        if fs::read_to_string(project.join(&path)).unwrap_or_default().replace("\r\n", "\n") != content {
             problems.push(format!("{path} on disk is not what the script wrote, so {} did not follow it", h.id));
         }
     }
