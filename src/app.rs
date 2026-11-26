@@ -419,9 +419,9 @@ fn claude_start(person: &Person, exe: &Path, link: &str, home: &Path, run: &Path
     Ok(())
 }
 
-/// The Codex app's first run: what kind of work, a setup to skip, then the new thread `--open-project` asked for. Each
-/// screen it shows and what the lab clicked there are kept in the run folder.
-fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
+/// The Codex app's first run: what kind of work and a setup to skip. `--open-project` lists the project, and a new chat
+/// starts in it from its button there. Each screen it shows and what the lab clicked there are kept in the run folder.
+fn codex_start(page: &mut Page, run: &Path, project: &str) -> Result<()> {
     sleep(Duration::from_secs(30));
     let mut log = String::new();
     for step in 0..10 {
@@ -449,6 +449,17 @@ fn codex_start(page: &mut Page, run: &Path) -> Result<()> {
             fs::write(run.join("steps.txt"), &log)?;
             if !ax.iter().any(|(r, _, _)| r == "textbox") {
                 bail!("the Codex app shows no message box:\n{log}");
+            }
+            let new = format!("Start new chat in {project}");
+            if !page.ax_click(&["button"], &new)? {
+                bail!("the Codex app lists no {project}:\n{log}");
+            }
+            sleep(Duration::from_secs(3));
+            let ax = page.ax()?;
+            let lines: Vec<String> = ax.iter().map(|(r, n, _)| format!("{r}: {}", n.chars().take(120).collect::<String>())).collect();
+            fs::write(run.join("ax-chat.txt"), lines.join("\n"))?;
+            if ax.iter().any(|(r, n, _)| r == "button" && n == "Choose project") {
+                bail!("the new chat in the Codex app is in no project");
             }
             return Ok(());
         }
@@ -887,7 +898,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     };
     let mut turns = Turns { model: &model, person: &person, restart: &mut restart };
     let start = |page: &mut Page| match app.source {
-        Source::Codex => codex_start(page, &p.run),
+        Source::Codex => codex_start(page, &p.run, &p.project.file_name().unwrap_or_default().to_string_lossy()),
         _ => t3_start(page, &p.project, app.pick.as_ref()),
     };
     let drove = match app.drive {
