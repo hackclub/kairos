@@ -12,8 +12,9 @@ use std::time::Duration;
 use kairos_core::exclude::Exclusions;
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation, ProcessHandleInformation};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, STATUS_INFO_LENGTH_MISMATCH,
+    CloseHandle, DuplicateHandle, ERROR_SUCCESS, HANDLE, HWND, INVALID_HANDLE_VALUE, STATUS_INFO_LENGTH_MISMATCH,
 };
+use windows_sys::Win32::Storage::Packaging::Appx::GetPackageFamilyName;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -366,17 +367,28 @@ impl Procs for Snapshot {
     }
 }
 
+// The family name of a packaged (Store or MSIX) app, like `OpenAI.Codex_2p2nqsd0c76g0`.
+fn package_family(pid: u32) -> Option<String> {
+    let h = Handle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let mut name = [0u16; 128];
+    let mut len = name.len() as u32;
+    let ok = unsafe { GetPackageFamilyName(h.0, &mut len, name.as_mut_ptr()) } == ERROR_SUCCESS;
+    ok.then(|| String::from_utf16_lossy(&name[..(len as usize).saturating_sub(1).min(name.len())]))
+}
+
 // Win32 class names don't name apps (every Electron app is Chrome_WidgetWin_1), so only the console
-// class is passed on: the owner Windows reports for a console window is the shell inside it.
+// class is passed on: the owner Windows reports for a console window is the shell inside it. A packaged app
+// passes its family name instead, which tells apart apps whose programs share a name (the Codex app and ChatGPT
+// both run ChatGPT.exe).
 fn foreground(buf: &mut [u16], sessions: &Sessions, consoles: &[Pseudo]) -> Option<(usize, Foreground)> {
     let hwnd = unsafe { GetForegroundWindow() };
     let pid = window_pid(hwnd)?;
     let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
-    let wclass = if String::from_utf16_lossy(&buf[..n]) == CONSOLE_WINDOW { CONSOLE_WINDOW } else { "" };
+    let wclass = if String::from_utf16_lossy(&buf[..n]) == CONSOLE_WINDOW { CONSOLE_WINDOW.to_string() } else { package_family(pid).unwrap_or_default() };
     let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }.max(0) as usize;
     let title = String::from_utf16_lossy(&buf[..n]);
     let sessions = sessions.shown(consoles, hwnd as usize);
-    Some((hwnd as usize, Foreground { pid, wclass: wclass.to_string(), title, sessions, window: hwnd as usize as u64 }))
+    Some((hwnd as usize, Foreground { pid, wclass, title, sessions, window: hwnd as usize as u64 }))
 }
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {

@@ -104,7 +104,8 @@ pub fn is_opencode_desktop(name: &str, wclass: &str) -> bool {
 }
 
 const CLAUDE_DESKTOP: &[&str] = &["claude-desktop", "com.anthropic.claude", "com.anthropic.claudefordesktop"];
-const CODEX_APP: &[&str] = &["codex", "com.openai.codex"];
+// On Windows the app is ChatGPT.exe in the package OpenAI.Codex.
+const CODEX_APP: &[&str] = &["codex", "com.openai.codex", "openai.codex"];
 
 /// Which agent app an `agent_app` window belongs to, for the ones whose logs say a prompt was typed in them.
 pub fn agent_app(name: &str, wclass: &str) -> Option<App> {
@@ -978,6 +979,8 @@ mod tests {
             ("chatgpt", "com.openai.codex", Some(App::CodexApp)),
             ("codex", "", Some(App::CodexApp)),
             ("chatgpt", "com.openai.chat", None),
+            ("chatgpt", "OpenAI.Codex_2p2nqsd0c76g0", Some(App::CodexApp)),
+            ("chatgpt", "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0", None),
             ("ai.opencode", "ai.opencode.desktop", Some(App::OpencodeDesktop)),
             ("opencode", "", Some(App::OpencodeDesktop)),
             ("t3code", "com.t3tools.t3code", None),
