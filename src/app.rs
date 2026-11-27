@@ -514,8 +514,7 @@ impl Drop for Editor {
         if cfg!(windows) {
             let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &self.child.id().to_string()]).output();
             // Those that outlived it hold files in the run folder.
-            let mine = format!("Get-Process | Where-Object {{ $_.Path -like '{}\\*' }} | Stop-Process -Force", self.folder.display());
-            let _ = Command::new("powershell").args(["-NoProfile", "-Command", &mine]).output();
+            stop_under(&[format!("{}\\", self.folder.display())]);
         } else {
             let _ = Command::new("pkill").arg("-f").arg(&self.folder).status();
         }
@@ -1141,6 +1140,13 @@ fn opencode_tab(kd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stops every process whose program's path starts with one of `prefixes` (Windows).
+fn stop_under(prefixes: &[String]) {
+    let any = prefixes.iter().map(|p| format!("$_.Path -like '{p}*'")).collect::<Vec<_>>().join(" -or ");
+    let stop = format!("Get-Process | Where-Object {{ $_.Path -and ({any}) }} | Stop-Process -Force");
+    let _ = Command::new("powershell").args(["-NoProfile", "-Command", &stop]).output();
+}
+
 /// The app's own logs for a run that failed: every small .log file under `dir`, kept in the run folder (whose upload
 /// leaves out the home).
 fn keep_logs(dir: &Path, run: &Path) {
@@ -1363,6 +1369,11 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
             // Started by its alias, so the app may not be the lab's own child.
             let _ = Command::new("taskkill").args(["/T", "/F", "/IM", "ChatGPT.exe"]).output();
         }
+        // What the tree missed, like a helper whose parent quit first. A codex left running holds files in ~/.codex,
+        // the real home's on Windows, and the next run there can't clear it.
+        let harness = cli.ancestors().find(|a| a.parent() == Some(tools.as_path())).unwrap_or(&bin_dir);
+        let package = format!("{}\\WindowsApps\\OpenAI.Codex_", std::env::var("ProgramFiles").unwrap_or_default());
+        stop_under(&[format!("{}\\", folder.display()), format!("{}\\", harness.display()), package]);
     } else {
         let _ = Command::new("pkill").arg("-f").arg(folder).status();
         // The agent's server the app started from the harness's own folder, or agy from the run's home.

@@ -466,10 +466,9 @@ fn place(args: &Args, name: &str, version: &str, state: &[&str]) -> Result<Place
         // Every run starts as a first install, with nothing an earlier version left behind.
         for kept in state {
             let old = home.join(kept);
-            if old.is_dir() {
-                fs::remove_dir_all(&old)?;
-            } else if old.is_file() {
-                fs::remove_file(&old)?;
+            let gone = if old.is_dir() { fs::remove_dir_all(&old) } else if old.is_file() { fs::remove_file(&old) } else { Ok(()) };
+            if let Err(e) = gone {
+                bail!("removing {}: {e}{}", old.display(), running());
             }
         }
         home
@@ -482,6 +481,18 @@ fn place(args: &Args, name: &str, version: &str, state: &[&str]) -> Result<Place
     }
     repo(&project)?;
     Ok(Place { run, home, project, kd })
+}
+
+/// On Windows a file still open can't be removed: the programs running, the system's own left out.
+fn running() -> String {
+    if !cfg!(windows) {
+        return String::new();
+    }
+    let list = "Get-Process | Where-Object { $_.Path -and $_.Path -notlike \"$env:SystemRoot\\*\" } | ForEach-Object { \"$($_.Id) $($_.Path)\" }";
+    match Command::new("powershell").args(["-NoProfile", "-Command", list]).output() {
+        Ok(o) => format!("\nrunning:\n{}", String::from_utf8_lossy(&o.stdout)),
+        Err(_) => String::new(),
+    }
 }
 
 /// A git repo with one commit, for the agent to work in.
