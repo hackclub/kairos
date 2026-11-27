@@ -524,9 +524,12 @@ fn claude_policy_off() {
 /// Claude desktop's first run: a welcome saying the organization set it up, then the link again (the first one came
 /// before it was ready) and its question whether to trust the folder. Each time the button wanted is the second one.
 fn claude_start(person: &Person, exe: &Path, link: &str, home: &Path, run: &Path) -> Result<()> {
+    // The keys go in blind, so what each one landed on is kept.
+    screenshot(&run.join("start0.png"));
     person.tab()?;
     person.enter()?;
     sleep(Duration::from_secs(5));
+    screenshot(&run.join("start1.png"));
     if OS == "macos" {
         // A Mac app takes links from the system, not from a second copy of itself.
         let bundle = exe.ancestors().nth(3).context("the app is in no bundle")?;
@@ -542,10 +545,21 @@ fn claude_start(person: &Person, exe: &Path, link: &str, home: &Path, run: &Path
         again.spawn()?;
     }
     sleep(Duration::from_secs(6));
+    screenshot(&run.join("start2.png"));
     person.tab()?;
     person.enter()?;
     sleep(Duration::from_secs(3));
+    screenshot(&run.join("start3.png"));
     Ok(())
+}
+
+/// The whole screen, where the system lets the lab take it (not on Windows, and macOS needs screen recording allowed).
+fn screenshot(to: &Path) {
+    let _ = match OS {
+        "macos" => Command::new("screencapture").arg("-x").arg(to).status(),
+        "linux" => Command::new("import").args(["-window", "root"]).arg(to).status(),
+        _ => return,
+    };
 }
 
 /// The Codex app's first run: what kind of work and a setup to skip. `--open-project` lists the project, and a new chat
@@ -1153,11 +1167,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     }
     if drove.is_err() && !cfg!(windows) {
         // What was on screen and what was still running when the lab gave up.
-        let shot = p.run.join("screen.png");
-        let _ = match OS {
-            "macos" => Command::new("screencapture").arg("-x").arg(&shot).status(),
-            _ => Command::new("import").args(["-window", "root"]).arg(&shot).status(),
-        };
+        screenshot(&p.run.join("screen.png"));
         if let Ok(ps) = Command::new("ps").args(["-A", "-o", "pid,stat,etime,args"]).output() {
             let _ = fs::write(p.run.join("ps.txt"), ps.stdout);
         }
