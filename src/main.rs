@@ -795,8 +795,8 @@ fn run() -> Result<bool> {
     person.busy(false);
     fs::write(run.join("screen.txt"), term.screen())?;
     term.kill();
-    if let Some(mut editor) = editor.take() {
-        if drove.is_err() {
+    if drove.is_err() {
+        if let Some(editor) = editor.as_mut() {
             let _ = fs::write(run.join("page.txt"), editor.text());
         }
     }
@@ -814,6 +814,8 @@ fn run() -> Result<bool> {
     }
     let _ = daemon.kill();
     let _ = daemon.wait();
+    // Once kairosd is gone: with VS Code closed the lab's own window is in front, in the lab's checkout.
+    drop(editor.take());
     // Codex leaves a server running from the run's own home.
     #[cfg(unix)]
     let _ = Command::new("pkill").arg("-f").arg(run).status();

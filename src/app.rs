@@ -1246,15 +1246,25 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         let kc = p.home.join("Library").join("Keychains").join("login.keychain");
         fs::create_dir_all(kc.parent().context("no keychain folder")?)?;
         let kc = kc.to_string_lossy().into_owned();
+        // A new keychain starts unlocked. Unlocking it again failed on the runner's macOS 26 ("passphrase not correct"),
+        // so that one may fail.
+        let mut said = String::new();
         for args in [
             vec!["create-keychain", "-p", "lab", &kc],
             vec!["set-keychain-settings", &kc],
-            vec!["unlock-keychain", "-p", "lab", &kc],
             vec!["list-keychains", "-d", "user", "-s", &kc],
             vec!["default-keychain", "-d", "user", "-s", &kc],
+            vec!["unlock-keychain", "-p", "lab", &kc],
+            vec!["default-keychain", "-d", "user"],
         ] {
-            output(Command::new("security").args(args).env("HOME", &p.home))?;
+            let out = Command::new("security").args(&args).env("HOME", &p.home).output()?;
+            said += &format!("$ security {}\n{}{}", args.join(" "), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            if !out.status.success() && args[0] != "unlock-keychain" {
+                fs::write(p.run.join("keychain.txt"), &said)?;
+                bail!("security {} failed:\n{said}", args[0]);
+            }
         }
+        fs::write(p.run.join("keychain.txt"), &said)?;
     }
     let bin = cli.parent().context("the harness has no folder")?.to_path_buf();
     let bin_dir = bin.clone();
