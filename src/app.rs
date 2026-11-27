@@ -959,6 +959,26 @@ fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns, start: impl FnOnce
     Ok(())
 }
 
+/// The app's own logs for a run that failed: every small .log file under `dir`, kept in the run folder (whose upload
+/// leaves out the home).
+fn keep_logs(dir: &Path, run: &Path) {
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => todo.push(path),
+                Ok(t) if t.is_file() && path.extension().is_some_and(|x| x == "log") && e.metadata().is_ok_and(|m| m.len() < 2_000_000) => {
+                    let name = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace(['/', '\\'], "_");
+                    let _ = fs::create_dir_all(run.join("logs"));
+                    let _ = fs::copy(&path, run.join("logs").join(name));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// A prompt the app's log says was typed in it only counts as typed there when Kairos saw that app's window in front.
 fn typed_in(all: &[Value], harness: &str) -> Vec<String> {
     let focus: Vec<(f64, &Value)> = all.iter().filter(|e| e["kind"] == "focus").map(|e| (e["ts"].as_f64().unwrap_or(0.0), &e["app"])).collect();
@@ -1133,6 +1153,13 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let requests: String = model.requests().iter().map(|r| format!("{r}\n")).collect();
     fs::write(p.run.join("requests.jsonl"), requests)?;
     crate::keep(&p, app.stores)?;
+    if drove.is_err() {
+        keep_logs(&p.home, &p.run);
+        // A macOS app logs under the account's own Library, not $HOME.
+        if let Some(own) = std::env::var_os("HOME").filter(|_| OS == "macos") {
+            keep_logs(&PathBuf::from(own).join("Library").join("Logs"), &p.run);
+        }
+    }
     drove?;
 
     let all = crate::events(&p.kd)?;

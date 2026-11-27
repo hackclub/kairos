@@ -550,6 +550,7 @@ const KNOWN: &[Known] = &[
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "is 0, the script says" },
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "something came after reply_done" },
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "the interrupted reply ended" },
+    Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "credit came while nobody had touched anything" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
