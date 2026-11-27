@@ -14,11 +14,11 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: "45946231752"
+  CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^qwen-code latest two'
-  SYSTEMS: 'windows'
+  ONLY: ''
+  SYSTEMS: ''
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
   GITHUB_TOKEN: ${{ github.token }}
