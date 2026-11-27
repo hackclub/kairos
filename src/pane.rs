@@ -29,8 +29,8 @@ pub struct Pane {
 impl Pane {
     /// Opens the window with nothing running in it yet, in `away`, a folder that is no project.
     pub fn open(run: &Path, away: &Path) -> Result<Pane> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port().to_string();
+        let panes = Panes::listen()?;
+        let port = panes.port.to_string();
         let exe = std::env::current_exe()?;
         let away = away.to_string_lossy().into_owned();
         if cfg!(windows) {
@@ -53,18 +53,7 @@ impl Pane {
             let ok = Command::new("setsid").args(["-f", "xterm", "-T", "lab-pane", "-e"]).arg(&exe).args(["pane", &port, &away]).status().context("xterm")?;
             anyhow::ensure!(ok.success(), "could not open a second xterm");
         }
-        listener.set_nonblocking(true)?;
-        let until = Instant::now() + Duration::from_secs(60);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((s, _)) => break s,
-                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < until => thread::sleep(Duration::from_millis(200)),
-                Err(e) => bail!("the second window never came up: {e}"),
-            }
-        };
-        stream.set_nonblocking(false)?;
-        let window = Window(line(&mut stream)?);
-        Ok(Pane { stream, window })
+        panes.next()
     }
 
     /// Starts the program in the window, as typing its name there would.
@@ -74,6 +63,36 @@ impl Pane {
         let env: Vec<(&str, &str)> = cmd.iter_full_env_as_str().collect();
         self.stream.write_all(format!("{}\n", json!({ "argv": argv, "cwd": cwd, "env": env })).as_bytes())?;
         Term::remote(self.stream.try_clone()?, raw_path)
+    }
+}
+
+/// Where the lab processes in other windows connect back to this one.
+pub struct Panes {
+    listener: TcpListener,
+    pub port: u16,
+}
+
+impl Panes {
+    pub fn listen() -> Result<Panes> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        Ok(Panes { listener, port })
+    }
+
+    /// The next window's lab process, once it is up.
+    pub fn next(&self) -> Result<Pane> {
+        let until = Instant::now() + Duration::from_secs(60);
+        let mut stream = loop {
+            match self.listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < until => thread::sleep(Duration::from_millis(200)),
+                Err(e) => bail!("the window's lab process never connected: {e}"),
+            }
+        };
+        stream.set_nonblocking(false)?;
+        let window = Window(line(&mut stream)?);
+        Ok(Pane { stream, window })
     }
 }
 
@@ -87,11 +106,12 @@ fn line(stream: &mut TcpStream) -> Result<String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// The lab process in the second window.
-pub fn serve(port: &str, away: &str) -> Result<bool> {
+/// The lab process in the second window, or with `editor` in a terminal inside the editor's window, which the lab
+/// knows already.
+pub fn serve(port: &str, away: &str, editor: bool) -> Result<bool> {
     std::env::set_current_dir(away)?;
     term::drain_stdin();
-    let window = own(&format!("lab-pane-{port}"))?;
+    let window = if editor { Window(String::new()) } else { own(&format!("lab-pane-{port}"))? };
     let mut stream = TcpStream::connect(("127.0.0.1", port.parse::<u16>()?))?;
     stream.write_all(format!("{}\n", window.0).as_bytes())?;
     let spec = line(&mut stream)?;
@@ -106,6 +126,15 @@ pub fn serve(port: &str, away: &str) -> Result<bool> {
     for kv in spec["env"].as_array().into_iter().flatten() {
         if let (Some(k), Some(v)) = (kv[0].as_str(), kv[1].as_str()) {
             cmd.env(k, v);
+        }
+    }
+    if editor {
+        // What the editor's terminal tells programs about itself (TERM_PROGRAM=vscode), which some agents act on.
+        for (k, v) in std::env::vars_os() {
+            let name = k.to_string_lossy().to_uppercase();
+            if name.starts_with("VSCODE_") || name.starts_with("TERM_PROGRAM") {
+                cmd.env(k, v);
+            }
         }
     }
     if let Some(cwd) = spec["cwd"].as_str() {

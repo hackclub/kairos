@@ -411,6 +411,87 @@ fn vscode_start(port: u16) -> Result<Page> {
     Ok(page)
 }
 
+/// VS Code open on the project, for an agent in its own terminal: each new terminal runs the lab's pane, which connects
+/// back on `port`.
+pub struct Editor {
+    child: std::process::Child,
+    folder: PathBuf,
+    /// Once past the welcome.
+    page: Option<Page>,
+}
+
+impl Editor {
+    pub fn open(args: &Args, p: &crate::Place, model_url: &str, port: u16) -> Result<Editor> {
+        let app = find("vscode").context("the lab has no VS Code")?;
+        let (exe, version) = app.install("latest", &std::path::absolute(&args.work)?.join("tools"))?;
+        eprintln!("lab: in VS Code {version}");
+        let (data, named) = vscode_data(&p.home)?;
+        vscode_setup(&data, model_url)?;
+        let file = data.join("User").join("settings.json");
+        let mut settings: Value = serde_json::from_str(&fs::read_to_string(&file)?)?;
+        let os = match OS {
+            "macos" => "osx",
+            "windows" => "windows",
+            _ => "linux",
+        };
+        let pane = json!({ "path": std::env::current_exe()?, "args": ["pane", port.to_string(), p.project, "editor"] });
+        settings[format!("terminal.integrated.profiles.{os}")] = json!({ "lab": pane });
+        settings[format!("terminal.integrated.defaultProfile.{os}")] = json!("lab");
+        settings["terminal.integrated.enablePersistentSessions"] = json!(false);
+        settings["terminal.integrated.confirmOnKill"] = json!("never");
+        fs::write(&file, serde_json::to_string_pretty(&settings)?)?;
+        hackatime(&exe, &args.kairosd, p)?;
+        let mut cmd = Command::new(&exe);
+        if named {
+            cmd.arg(format!("--user-data-dir={}", data.display()));
+        }
+        cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project);
+        if OS == "linux" {
+            cmd.args(["--no-sandbox", "--disable-gpu"]);
+        }
+        if OS == "macos" {
+            cmd.arg("--use-mock-keychain");
+        }
+        let log = || OpenOptions::new().create(true).append(true).open(p.run.join("app.log"));
+        cmd.current_dir(&p.project).env("HOME", &p.home).env("USERPROFILE", &p.home).stdin(Stdio::null()).stdout(log()?).stderr(log()?);
+        for k in STRAY_ENV {
+            cmd.env_remove(k);
+        }
+        let child = cmd.spawn().with_context(|| format!("starting {}", exe.display()))?;
+        let folder = exe.parent().context("VS Code has no folder")?.to_path_buf();
+        let mut editor = Editor { child, folder, page: None };
+        editor.page = Some(vscode_start(PORT)?);
+        Ok(editor)
+    }
+
+    /// A new terminal, from the command palette.
+    pub fn terminal(&mut self) -> Result<()> {
+        let page = self.page.as_mut().context("VS Code never got past its welcome")?;
+        page.key("F1")?;
+        sleep(Duration::from_millis(800));
+        page.type_text("Terminal: Create New Terminal")?;
+        sleep(Duration::from_millis(800));
+        page.key("Enter")
+    }
+
+    pub fn text(&mut self) -> String {
+        self.page.as_mut().and_then(|p| p.text().ok()).unwrap_or_default()
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        // Electron's helpers all run from the app's own folder.
+        if cfg!(windows) {
+            let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &self.child.id().to_string()]).output();
+        } else {
+            let _ = Command::new("pkill").arg("-f").arg(&self.folder).status();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// The newest Codex app. Only the Mac's feed names versions.
 fn codex_app(want: &str) -> Result<(String, String)> {
     let (version, url) = if OS == "macos" {
@@ -816,6 +897,7 @@ impl Page {
             "Enter" => 13,
             "Backspace" => 8,
             "Escape" => 27,
+            "F1" => 112,
             _ => bail!("the lab has no key {key}"),
         };
         let mut down = json!({ "type": "keyDown", "key": key, "code": key, "windowsVirtualKeyCode": code });

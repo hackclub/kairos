@@ -653,12 +653,12 @@ fn command(bin: &Path, args: &[String], project: &Path, home: &Path, env: &[(Str
 /// A person starts on the agent once it's up in their terminal. Kairos sees the new program a moment later (up to 15 s
 /// when the window stays in front), and keys pressed before that count for whatever ran there first, the lab itself
 /// here. Gives when Kairos saw it, or nothing after 30 s: the checks say what Kairos saw.
-fn wait_focus(kd: &Path, project: &str, since: f64) -> Result<Option<f64>> {
+fn wait_focus(kd: &Path, class: &str, project: &str, since: f64) -> Result<Option<f64>> {
     let until = Instant::now() + Duration::from_secs(30);
     while Instant::now() < until {
         let seen = events(kd)?.iter().find_map(|e| {
             let ts = e["ts"].as_f64().filter(|&t| t >= since)?;
-            (e["kind"] == "focus" && e["class"] == "agent_terminal" && e["project"] == project).then_some(ts)
+            (e["kind"] == "focus" && e["class"] == class && e["project"] == project).then_some(ts)
         });
         if seen.is_some() {
             return Ok(seen);
@@ -671,8 +671,8 @@ fn wait_focus(kd: &Path, project: &str, since: f64) -> Result<Option<f64>> {
 fn run() -> Result<bool> {
     if std::env::args().nth(1).as_deref() == Some("pane") {
         let mut words = std::env::args().skip(2);
-        let (Some(port), Some(away)) = (words.next(), words.next()) else { bail!("usage: lab pane <port> <folder>") };
-        return pane::serve(&port, &away);
+        let (Some(port), Some(away)) = (words.next(), words.next()) else { bail!("usage: lab pane <port> <folder> [editor]") };
+        return pane::serve(&port, &away, words.next().as_deref() == Some("editor"));
     }
     if std::env::args().nth(1).as_deref() == Some("model") {
         return serve(&std::env::args().nth(2).context("usage: lab model <project folder>")?);
@@ -698,8 +698,13 @@ fn run() -> Result<bool> {
     }
     // Runs the agent in a pane of tmux or screen, whose server runs it away from the window.
     let mux = ["tmux", "screen"].into_iter().find(|m| args.scenario == *m);
-    if args.scenario != "basic" && mux.is_none() {
-        bail!("no scenario {:?}, the lab knows basic, two, tmux and screen", args.scenario);
+    // Runs it in VS Code's own terminal, in VS Code's window.
+    let in_editor = args.scenario == "vscode";
+    if args.scenario != "basic" && mux.is_none() && !in_editor {
+        bail!("no scenario {:?}, the lab knows basic, two, tmux, screen and vscode", args.scenario);
+    }
+    if in_editor && !args.window {
+        bail!("the vscode scenario runs the agent in VS Code's window, so it needs --window");
     }
     if let Some(m) = mux {
         if cfg!(windows) || Command::new("sh").args(["-c", &format!("command -v {m}")]).output().map_or(true, |o| !o.status.success()) {
@@ -716,6 +721,9 @@ fn run() -> Result<bool> {
     if let Some(m) = mux {
         scenario.name = m;
     }
+    if in_editor {
+        scenario.name = "vscode";
+    }
     let scenario = Arc::new(scenario);
     let model = Model::start(scenario.clone(), project.clone())?.reads_first(h.reads_first);
     let url = format!("http://127.0.0.1:{}", model.port);
@@ -727,6 +735,8 @@ fn run() -> Result<bool> {
     sleep(Duration::from_secs(2));
 
     let launch = (h.prepare)(home, project, &url, &version)?;
+    let panes = pane::Panes::listen()?;
+    let mut editor = if in_editor { Some(app::Editor::open(&args, &p, &url, panes.port)?) } else { None };
     // The run's own server.
     let sock = format!("lab-{}", std::process::id());
     let conf = run.join("mux.conf");
@@ -735,7 +745,12 @@ fn run() -> Result<bool> {
         Some(_) => fs::write(&conf, "startup_message off\nmaptimeout 0\n")?,
         None => {}
     }
-    let open = |args: &[String], raw: &str| -> Result<Term> {
+    let mut open = |args: &[String], raw: &str| -> Result<Term> {
+        if let Some(editor) = editor.as_mut() {
+            // A new terminal in the editor, and the agent typed into it.
+            editor.terminal()?;
+            return panes.next()?.start(&command(&bin, args, project, home, &launch.env), &run.join(raw));
+        }
         let Some(m) = mux else {
             return Term::spawn(command(&bin, args, project, home, &launch.env), &run.join(raw));
         };
@@ -751,9 +766,10 @@ fn run() -> Result<bool> {
         cmd.env_remove("STY");
         Term::spawn(cmd, &run.join(raw))
     };
+    let window = if in_editor { "editor" } else { "agent_terminal" };
     let mut term = open(&launch.args, "pty.raw")?;
     if args.window {
-        wait_focus(kd, "proj", 0.0)?;
+        wait_focus(kd, window, "proj", 0.0)?;
     }
     let mut reopen = || open(&launch.resume, "pty2.raw");
     let mut restart = || -> Result<()> {
@@ -775,6 +791,11 @@ fn run() -> Result<bool> {
     person.busy(false);
     fs::write(run.join("screen.txt"), term.screen())?;
     term.kill();
+    if let Some(mut editor) = editor.take() {
+        if drove.is_err() {
+            let _ = fs::write(run.join("page.txt"), editor.text());
+        }
+    }
     if let Some(m) = mux {
         let stop: &[&str] = if m == "tmux" { &["-L", &sock, "kill-server"] } else { &["-S", &sock, "-X", "quit"] };
         let _ = Command::new(m).args(stop).status();
@@ -803,7 +824,7 @@ fn run() -> Result<bool> {
     problems.extend(check(h, h.writes_version.then_some(version.as_str()), &scenario, &done.esc, &all, project)?);
     let mut summary = None;
     if args.window {
-        problems.extend(front(&all, h.id, "agent_terminal", &done.closed));
+        problems.extend(front(&all, h.id, window, &done.closed));
         let (wrong, said) = credit::check(kd, h.id, "proj", &person, &done.closed)?;
         problems.extend(wrong);
         summary = Some(said);

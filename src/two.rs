@@ -135,7 +135,7 @@ fn drive(h: &Harness, term: &mut Term, model: &Model, a: &Scenario, second: Seco
     let tb = second.term.as_mut().expect("just started");
     let mut hands_b = Hands::new(&person);
     ready(h, tb, &mut hands_b)?;
-    let seen = wait_focus(kd, SECOND, started)?;
+    let seen = wait_focus(kd, "agent_terminal", SECOND, started)?;
     desk.up = true;
     desk.shown.push((seen.unwrap_or_else(now), Some(SECOND)));
     send(tb, second.model, 0, &second.scenario.turns[0], &person)?;
@@ -241,7 +241,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     window_key(&person)?;
     let mut desk = Desk { person: person.clone(), main, pane: pane.window.clone(), up: false, shown: Vec::new() };
     let mut term = Term::spawn(command(&bin, &launch.args, &p.project, &p.home, &launch.env), &p.run.join("pty.raw"))?;
-    let seen = wait_focus(&p.kd, "proj", 0.0)?;
+    let seen = wait_focus(&p.kd, "agent_terminal", "proj", 0.0)?;
     desk.shown.push((seen.unwrap_or_else(now), Some("proj")));
     let mut term_b = None;
     let raw_b = p.run.join("pty-second.raw");

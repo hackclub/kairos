@@ -38,3 +38,5 @@ claude-code latest tmux
 codex latest tmux
 opencode 2.x tmux
 antigravity latest tmux
+claude-code latest vscode
+opencode 2.x vscode
