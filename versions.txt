@@ -22,6 +22,7 @@ copilot-cli latest
 vscode latest
 pi latest
 qwen-code latest
+gemini-cli latest
 claude-code latest two
 codex latest two
 opencode 1.x two

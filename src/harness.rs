@@ -210,6 +210,22 @@ pub const ALL: &[Harness] = &[
         reads_first: true,
         prepare: qwen,
     },
+    Harness {
+        id: "gemini-cli",
+        source: Source::Npm("@google/gemini-cli"),
+        bin: "gemini",
+        stores: &[".gemini/tmp"],
+        state: &[".gemini"],
+        first_run: &[],
+        ready: &["Type your message or @path/to/file"],
+        during: &[],
+        marks_since: None,
+        writes_esc: false,
+        writes_version: false,
+        counts_writes: true,
+        reads_first: false,
+        prepare: gemini,
+    },
 ];
 
 const ANTIGRAVITY: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
@@ -307,6 +323,24 @@ fn qwen(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result
     let env = [("OPENAI_API_KEY", "lab"), ("OPENAI_BASE_URL", base.as_str()), ("OPENAI_MODEL", "test-model")];
     let args = vec!["--yolo".to_string()];
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
+}
+
+fn gemini(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+    let dir = home.join(".gemini");
+    fs::create_dir_all(&dir)?;
+    // The folder is trusted up front, the way it saves the answer: after the question it restarts, and the old question
+    // stays on screen above the new prompt.
+    let path = dir.join("trustedFolders.json");
+    let mut trusted: Value = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    trusted[project.to_string_lossy().as_ref()] = json!("TRUST_FOLDER");
+    fs::write(&path, serde_json::to_string_pretty(&trusted)?)?;
+    // A key picked up front keeps it from asking how to sign in, and the base URL sends it to the lab's model.
+    let settings = json!({ "security": { "auth": { "selectedType": "gemini-api-key" } }, "general": { "disableAutoUpdate": true } });
+    fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
+    let env = [("GEMINI_API_KEY", "lab"), ("GOOGLE_GEMINI_BASE_URL", model_url)];
+    let args = vec!["--yolo".to_string()];
+    let resume = args.iter().cloned().chain(["--resume".to_string(), "latest".to_string()]).collect();
     Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
 }
 

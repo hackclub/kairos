@@ -558,6 +558,10 @@ const KNOWN: &[Known] = &[
     Known { bug: 53, harness: "qwen-code", fixed: "", text: "agent_commit count is 0" },
     Known { bug: 53, harness: "qwen-code", fixed: "", text: "reply_done.files_changed is" },
     Known { bug: 53, harness: "qwen-code", fixed: "", text: "prompt.words is" },
+    Known { bug: 54, harness: "qwen-code", fixed: "", text: "window in front" },
+    Known { bug: 54, harness: "qwen-code", fixed: "", text: "credit came while nobody had touched anything" },
+    Known { bug: 55, harness: "gemini-cli", fixed: "", text: "Kairos saw" },
+    Known { bug: 55, harness: "gemini-cli", fixed: "", text: "turn " },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {

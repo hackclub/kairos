@@ -274,6 +274,9 @@ fn offered(body: &Value) -> Vec<Value> {
     }
     let mut out = Vec::new();
     flat(body["tools"].as_array().map(Vec::as_slice).unwrap_or_default(), &mut out);
+    for t in body["tools"].as_array().into_iter().flatten() {
+        out.extend(t["functionDeclarations"].as_array().into_iter().flatten().cloned());
+    }
     for i in body["input"].as_array().into_iter().flatten().filter(|i| i["type"] == "additional_tools") {
         flat(i["tools"].as_array().map(Vec::as_slice).unwrap_or_default(), &mut out);
     }
@@ -378,8 +381,14 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
     if let (Act::Edit { path, old, new }, true) = (act, key(tool, &["edits"]).is_some()) {
         args = json!({ "path": file(path), "edits": [{ "oldText": old, "newText": new }] });
     }
-    // agy turns its command away without a summary and a wait before it goes to the background.
-    for (name, value) in [("description", json!("Run the scripted command")), ("toolSummary", json!("Run the scripted command")), ("WaitMsBeforeAsync", json!(30000))] {
+    // agy turns its command away without a summary and a wait before it goes to the background, Gemini CLI an edit
+    // without an instruction.
+    for (name, value) in [
+        ("description", json!("Run the scripted command")),
+        ("toolSummary", json!("Run the scripted command")),
+        ("WaitMsBeforeAsync", json!(30000)),
+        ("instruction", json!("Make the scripted edit")),
+    ] {
         if key(tool, &[name]).is_some() {
             args[name] = value;
         }
@@ -445,6 +454,54 @@ fn chat(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static st
     ("text/event-stream", format!("data: {first}\n\ndata: {last}\n\ndata: {tail}\n\ndata: [DONE]\n\n"), note)
 }
 
+/// Google's generateContent, for Gemini CLI. Its side jobs (is the model done, which model to use) ask for JSON and
+/// offer no tools.
+fn gemini(state: &Mutex<State>, lane: Option<usize>, body: &Value, stream: bool) -> (&'static str, String, String) {
+    let tools: Vec<Value> = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["functionDeclarations"].as_array())
+        .flatten()
+        .map(|d| json!({ "name": d["name"], "parameters": if d["parameters"].is_null() { d["parametersJsonSchema"].clone() } else { d["parameters"].clone() } }))
+        .collect();
+    let answered: Vec<String> = body["contents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["parts"].as_array())
+        .flatten()
+        .filter_map(|p| p["functionResponse"]["id"].as_str().map(str::to_string))
+        .collect();
+    let project = project(state, lane);
+    let json_asked = body["generationConfig"]["responseMimeType"] == "application/json";
+    let text = |t: &str| json!({ "text": t });
+    let (note, part) = match plan(state, lane, !tools.is_empty(), &answered) {
+        Plan::Side => ("side".to_string(), text(if json_asked { "{}" } else { "ok" })),
+        Plan::Stall => ("stall".to_string(), text("ok")),
+        Plan::Say(t) => ("say".to_string(), text(&t)),
+        Plan::Act(id, act) => match chat_call(&tools, act, &project) {
+            Some((name, args)) => (id.clone(), json!({ "functionCall": { "id": format!("call_{id}"), "name": name, "args": args } })),
+            None => {
+                let problem = format!("step {id}: this version offers no tool the lab knows for it: {:?}", names(&tools));
+                state.lock().unwrap().problems.push(problem);
+                (id, text("The lab has no tool for this step."))
+            }
+        },
+    };
+    let usage = json!({ "promptTokenCount": 10, "candidatesTokenCount": 20, "totalTokenCount": 30 });
+    let answer = json!({
+        "candidates": [{ "content": { "role": "model", "parts": [part] }, "finishReason": "STOP", "index": 0 }],
+        "usageMetadata": usage,
+        "modelVersion": "gemini-2.5-pro",
+    });
+    if stream {
+        ("text/event-stream", format!("data: {answer}\r\n\r\n"), note)
+    } else {
+        ("application/json", answer.to_string(), note)
+    }
+}
+
 fn handle(state: &Mutex<State>, mut req: Request) {
     let mut raw = String::new();
     let _ = req.as_reader().read_to_string(&mut raw);
@@ -482,6 +539,10 @@ fn handle(state: &Mutex<State>, mut req: Request) {
         responses(state, lane, &body, side, path.contains("/think/"))
     } else if path.ends_with("/chat/completions") {
         chat(state, lane, &body)
+    } else if path.ends_with(":countTokens") {
+        ("application/json", json!({ "totalTokens": 42 }).to_string(), "count".to_string())
+    } else if path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent") {
+        gemini(state, lane, &body, path.ends_with(":streamGenerateContent"))
     } else {
         ("application/json", "{}".to_string(), "unknown".to_string())
     };
