@@ -17,7 +17,7 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^claude-code latest tmux'
+  ONLY: ' two$|^claude-code latest tmux'
   SYSTEMS: 'macos'
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
