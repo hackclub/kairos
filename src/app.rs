@@ -1126,6 +1126,17 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
             sleep(Duration::from_secs(1));
         }
     }
+    if drove.is_err() && !cfg!(windows) {
+        // What was on screen and what was still running when the lab gave up.
+        let shot = p.run.join("screen.png");
+        let _ = match OS {
+            "macos" => Command::new("screencapture").arg("-x").arg(&shot).status(),
+            _ => Command::new("import").args(["-window", "root"]).arg(&shot).status(),
+        };
+        if let Ok(ps) = Command::new("ps").args(["-A", "-o", "pid,stat,etime,args"]).output() {
+            let _ = fs::write(p.run.join("ps.txt"), ps.stdout);
+        }
+    }
     person.busy(false);
     // Electron's helpers and the harness it started all run from the app's own folder.
     let folder = exe.parent().context("the app has no folder")?;
