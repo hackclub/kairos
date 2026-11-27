@@ -15,15 +15,19 @@ fi
 # Inside work/tools, so each run's downloads go away with it.
 export npm_config_cache="$work/tools/.npm"
 : > result.txt
+# On macOS, which windows are on screen between runs (lab.yml sets WINDOWS).
+windows() { [ -n "${WINDOWS:-}" ] && { echo "== $1"; "$WINDOWS"; } >> windows.txt; }
 # versions.txt comes in on fd 3: stdin stays the terminal, which the two-window runs read.
 while read -r harness version scenario <&3; do
   [ -z "$harness" ] && continue
   # ONLY in lab.yml picks some lines, for trying one thing.
   [ -n "${ONLY:-}" ] && ! grep -qE "$ONLY" <<< "$harness $version $scenario" && continue
+  windows "before $harness $version $scenario"
   "./target/release/lab$exe" run "$harness" "$version" --kairosd "dist/$target/kairosd$exe" --scenario "${scenario:-basic}" --work "$work" "$@" > out.txt 2>&1 || failed=1
   if grep -E "^(PASS|FAIL|SKIP|lab:|  )" out.txt > part.txt; then cat part.txt; else tail -20 out.txt | tee part.txt; fi
   cat part.txt >> result.txt
   rm -rf "$work/tools"
 done 3< <(tr -d '\r' < "${VERSIONS:-versions.txt}")
+windows "after the runs"
 echo "$failed" > failed.txt
 exit "$failed"

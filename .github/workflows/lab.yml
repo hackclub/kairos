@@ -18,9 +18,9 @@ env:
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
   ONLY: ''
-  SYSTEMS: ''
+  SYSTEMS: 'macos'
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
-  VERSIONS: versions.txt
+  VERSIONS: ci/order.txt
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
@@ -82,11 +82,13 @@ jobs:
         if: runner.os == 'macOS' && (env.SYSTEMS == '' || contains(env.SYSTEMS, 'macos'))
         run: |
           if grep -q tmux "$VERSIONS"; then HOMEBREW_NO_AUTO_UPDATE=1 brew install -q tmux; fi
-          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q RUNNER_TEMP=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$RUNNER_TEMP" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
+          swiftc -O ci/windows.swift -o "$RUNNER_TEMP/windows" || true
+          printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q RUNNER_TEMP=%q WINDOWS=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$RUNNER_TEMP" "$RUNNER_TEMP/windows" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"
           for i in $(seq 6600); do [ -f failed.txt ] && break; sleep 2; done
           cat result.txt
+          cat windows.txt 2>/dev/null
           [ -f failed.txt ] || { echo "the runs did not finish in 220 minutes"; exit 1; }
           exit "$(cat failed.txt)"
       # Bug 41: kairosd kept the folder it was started in, and Windows can't rename or delete a folder a process is in.
