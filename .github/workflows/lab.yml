@@ -17,8 +17,8 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: 'vscode$'
-  SYSTEMS: ''
+  ONLY: '^claude-desktop'
+  SYSTEMS: 'macos'
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
   GITHUB_TOKEN: ${{ github.token }}
@@ -83,14 +83,6 @@ jobs:
         run: |
           if grep -q tmux "$VERSIONS"; then HOMEBREW_NO_AUTO_UPDATE=1 brew install -q tmux; fi
           swiftc -O ci/windows.swift -o "$RUNNER_TEMP/windows" || true
-          # Claude desktop's safe storage waited forever on the runner's keychain password dialog. A keychain of the lab's
-          # own, unlocked, takes its place.
-          kc="$RUNNER_TEMP/lab.keychain-db"
-          security create-keychain -p lab "$kc"
-          security set-keychain-settings "$kc"
-          security unlock-keychain -p lab "$kc"
-          security list-keychains -d user -s "$kc"
-          security default-keychain -d user -s "$kc"
           printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q RUNNER_TEMP=%q WINDOWS=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$RUNNER_TEMP" "$RUNNER_TEMP/windows" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"

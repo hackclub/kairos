@@ -1239,6 +1239,22 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     if app.id == "claude-desktop" {
         claude_policy(&url, &p.run)?;
     }
+    if app.id == "claude-desktop" && OS == "macos" {
+        // It saves a secret in the default keychain at startup. On the run's home there is none, so macOS asks to make a
+        // login keychain in a dialog nobody answers and the app waits on it. An unlocked one there, like a person's.
+        let kc = p.home.join("Library").join("Keychains").join("login.keychain-db");
+        fs::create_dir_all(kc.parent().context("no keychain folder")?)?;
+        let kc = kc.to_string_lossy().into_owned();
+        for args in [
+            vec!["create-keychain", "-p", "lab", &kc],
+            vec!["set-keychain-settings", &kc],
+            vec!["unlock-keychain", "-p", "lab", &kc],
+            vec!["list-keychains", "-d", "user", "-s", &kc],
+            vec!["default-keychain", "-d", "user", "-s", &kc],
+        ] {
+            output(Command::new("security").args(args).env("HOME", &p.home))?;
+        }
+    }
     let bin = cli.parent().context("the harness has no folder")?.to_path_buf();
     let bin_dir = bin.clone();
     // On Windows an app can't run npm's claude.cmd without a shell. T3 looks for the package next to the shim, the way
