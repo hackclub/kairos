@@ -38,3 +38,6 @@ opencode 2.x tmux
 antigravity latest tmux
 claude-code latest vscode
 opencode 2.x vscode
+codex latest vscode
+antigravity latest vscode
+copilot-cli latest vscode
