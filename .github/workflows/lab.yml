@@ -17,7 +17,7 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^(vscode|copilot-cli 1\.0\.108)'
+  ONLY: '^(codex-app|claude-desktop|opencode-desktop) '
   SYSTEMS: ""
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
