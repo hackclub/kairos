@@ -1127,6 +1127,20 @@ fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns, start: impl FnOnce
     Ok(())
 }
 
+/// The link opens the project in a new tab, on a slow Mac well after the window shows, and what is typed before that
+/// is lost. The app saves the open tab a moment after its message box is up, and Kairos reads the window's project there.
+fn opencode_tab(kd: &Path) -> Result<()> {
+    let until = Instant::now() + Duration::from_secs(60);
+    while !crate::events(kd)?.iter().any(|e| e["kind"] == "focus" && e["class"] == "agent_app" && e["project"] == "proj") {
+        if Instant::now() > until {
+            bail!("Kairos never saw OpenCode desktop's window in the project");
+        }
+        sleep(Duration::from_millis(500));
+    }
+    sleep(Duration::from_secs(2));
+    Ok(())
+}
+
 /// The app's own logs for a run that failed: every small .log file under `dir`, kept in the run folder (whose upload
 /// leaves out the home).
 fn keep_logs(dir: &Path, run: &Path) {
@@ -1310,6 +1324,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         }),
         Drive::Keys(link) => type_in(&scenario, &p.kd, &mut turns, || match app.id {
             "claude-desktop" => claude_start(&person, &exe, &link(&p.project), &p.home, &p.run),
+            "opencode-desktop" => opencode_tab(&p.kd),
             _ => Ok(()),
         }),
     };
