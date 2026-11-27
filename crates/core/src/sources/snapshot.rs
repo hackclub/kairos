@@ -18,6 +18,7 @@ pub(crate) struct Turn {
     pub pasted: bool,
     pub shape: Option<Shape>,
     pub model: Option<String>,
+    pub version: Option<String>,
     pub started: Option<f64>,
     pub done: Option<f64>,
     pub reply_words: usize,
@@ -100,7 +101,7 @@ impl Snapshots {
                         model: t.model.clone(),
                         session: session.to_string(),
                         shape: t.shape.clone(),
-                        version: None,
+                        version: t.version.clone(),
                         via: None,
                     },
                 ));
