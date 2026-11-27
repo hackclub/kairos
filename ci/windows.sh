@@ -12,3 +12,8 @@ tell application "Terminal"
   return out
 end tell' 2>&1
 ps -axo pid,ppid,tty,stat,comm | awk 'NR == 1 || $3 != "??"'
+# Where a second window's lab process that outlived its run is waiting.
+for pid in $(pgrep -f "release/lab pane"); do
+  echo "lab pane $pid still running:"
+  sample "$pid" 1 2>/dev/null | awk '/Call graph:/{p=1} /Total number in stack/{p=0} p' | grep -vE "^\s*$" | cut -c1-160 | head -60
+done
