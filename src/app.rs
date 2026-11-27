@@ -1241,8 +1241,9 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     }
     if app.id == "claude-desktop" && OS == "macos" {
         // It saves a secret in the default keychain at startup. On the run's home there is none, so macOS asks to make a
-        // login keychain in a dialog nobody answers and the app waits on it. An unlocked one there, like a person's.
-        let kc = p.home.join("Library").join("Keychains").join("login.keychain-db");
+        // login keychain in a dialog nobody answers and the app waits on it. An unlocked one there, like a person's
+        // (security adds the -db itself).
+        let kc = p.home.join("Library").join("Keychains").join("login.keychain");
         fs::create_dir_all(kc.parent().context("no keychain folder")?)?;
         let kc = kc.to_string_lossy().into_owned();
         for args in [
