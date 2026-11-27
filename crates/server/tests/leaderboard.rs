@@ -71,3 +71,18 @@ async fn streak_counts_days_with_fifteen_minutes() {
     drop(c);
     app.finish().await;
 }
+
+#[tokio::test]
+async fn a_zone_name_postgres_may_not_know_still_gets_its_own_today() {
+    let app = TestApp::new().await;
+    let ind = user(&app, "ind", true, "unscored", "Asia/Calcutta").await;
+    let today = Utc::now().with_timezone(&chrono_tz::Asia::Calcutta).date_naive();
+    let c = app.st.pool.get().await.unwrap();
+    c.execute("INSERT INTO user_days (user_id, day, project, class, seconds) VALUES ($1, $2, 'o/p', 'typing', 900)", &[&ind, &today])
+        .await
+        .unwrap();
+    let top = leaderboard::top(&c, Period::Today, 10).await.unwrap();
+    assert_eq!(top.iter().map(|e| (e.username.as_str(), e.seconds)).collect::<Vec<_>>(), [("ind", 900.0)]);
+    drop(c);
+    app.finish().await;
+}
