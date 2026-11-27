@@ -959,6 +959,19 @@ fn type_in(scenario: &Scenario, kd: &Path, turns: &mut Turns, start: impl FnOnce
     Ok(())
 }
 
+/// A prompt the app's log says was typed in it only counts as typed there when Kairos saw that app's window in front.
+fn typed_in(all: &[Value], harness: &str) -> Vec<String> {
+    let focus: Vec<(f64, &Value)> = all.iter().filter(|e| e["kind"] == "focus").map(|e| (e["ts"].as_f64().unwrap_or(0.0), &e["app"])).collect();
+    all.iter()
+        .filter(|e| e["harness"] == harness && e["kind"] == "prompt" && !e["via"].is_null())
+        .filter_map(|e| {
+            let ts = e["ts"].as_f64()?;
+            let front = focus.iter().rev().find(|(t, _)| *t <= ts).map_or(&Value::Null, |(_, app)| *app);
+            (*front != e["via"]).then(|| format!("a prompt typed in {} came with app {front} in front", e["via"]))
+        })
+        .collect()
+}
+
 pub fn run(app: &App, args: &Args) -> Result<bool> {
     if matches!(app.source, Source::Codex) && OS == "linux" {
         println!("SKIP {}: no Linux build", app.id);
@@ -1130,6 +1143,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     if args.window {
         let window = if matches!(app.drive, Drive::Chat) { "editor" } else { "agent_app" };
         problems.extend(crate::front(&all, h.id, window, &[]));
+        problems.extend(typed_in(&all, h.id));
         let (wrong, said) = credit::check(&p.kd, h.id, "proj", &person, &[])?;
         problems.extend(wrong);
         summary = Some(said);
