@@ -12,8 +12,6 @@ opencode 2.4.1
 opencode 2.x
 antigravity latest
 opencode-desktop latest
-opencode-desktop 2.3.2
-opencode-desktop 2.2.7
 t3code latest
 t3code-codex latest
 t3code-opencode latest

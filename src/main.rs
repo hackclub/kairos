@@ -729,6 +729,7 @@ fn run() -> Result<bool> {
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 
+    let code = if in_editor { Some(app::Editor::install(&root.join("tools"))?) } else { None };
     let person = Person::new(args.window)?;
     let start = || daemon(&args, &p);
     let mut daemon = start()?;
@@ -736,7 +737,10 @@ fn run() -> Result<bool> {
 
     let launch = (h.prepare)(home, project, &url, &version)?;
     let panes = pane::Panes::listen()?;
-    let mut editor = if in_editor { Some(app::Editor::open(&args, &p, &url, panes.port)?) } else { None };
+    let mut editor = match &code {
+        Some(exe) => Some(app::Editor::open(exe, &args, &p, &url, panes.port)?),
+        None => None,
+    };
     // The run's own server.
     let sock = format!("lab-{}", std::process::id());
     let conf = run.join("mux.conf");
@@ -749,7 +753,8 @@ fn run() -> Result<bool> {
         if let Some(editor) = editor.as_mut() {
             // A new terminal in the editor, and the agent typed into it.
             editor.terminal()?;
-            return panes.next()?.start(&command(&bin, args, project, home, &launch.env), &run.join(raw));
+            let mut pane = panes.next().map_err(|e| anyhow::anyhow!("{e}. VS Code shows:\n{}", editor.text()))?;
+            return pane.start(&command(&bin, args, project, home, &launch.env), &run.join(raw));
         }
         let Some(m) = mux else {
             return Term::spawn(command(&bin, args, project, home, &launch.env), &run.join(raw));

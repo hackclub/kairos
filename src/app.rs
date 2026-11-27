@@ -339,8 +339,9 @@ fn vscode_data(home: &Path) -> Result<(PathBuf, bool)> {
 /// Install gives the person Hackatime's plugin and points WakaTime at kairosd, so the editor's own heartbeats are in the
 /// run like on a real machine.
 fn hackatime(exe: &Path, kairosd: &Path, p: &crate::Place) -> Result<()> {
+    // From the home folder: a terminal in front running `code` in the lab's own checkout would be a project to Kairos.
     let home = |cmd: &mut Command| {
-        cmd.env("HOME", &p.home).env("USERPROFILE", &p.home).env("KAIROS_DIR", &p.kd);
+        cmd.current_dir(&p.home).env("HOME", &p.home).env("USERPROFILE", &p.home).env("KAIROS_DIR", &p.kd);
         for k in crate::STRAY_ENV {
             cmd.env_remove(k);
         }
@@ -421,11 +422,19 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn open(args: &Args, p: &crate::Place, model_url: &str, port: u16) -> Result<Editor> {
-        let app = find("vscode").context("the lab has no VS Code")?;
-        let (exe, version) = app.install("latest", &std::path::absolute(&args.work)?.join("tools"))?;
+    /// The newest VS Code, before kairosd starts: downloading and unpacking it in the lab's terminal would show there.
+    pub fn install(tools: &Path) -> Result<PathBuf> {
+        let (exe, version) = find("vscode").context("the lab has no VS Code")?.install("latest", tools)?;
         eprintln!("lab: in VS Code {version}");
+        Ok(exe)
+    }
+
+    pub fn open(exe: &Path, args: &Args, p: &crate::Place, model_url: &str, port: u16) -> Result<Editor> {
         let (data, named) = vscode_data(&p.home)?;
+        if !named && args.real_home && OS == "windows" {
+            // The runner's own, left by the run before: VS Code's welcome comes only on a first start.
+            let _ = fs::remove_dir_all(&data);
+        }
         vscode_setup(&data, model_url)?;
         let file = data.join("User").join("settings.json");
         let mut settings: Value = serde_json::from_str(&fs::read_to_string(&file)?)?;
@@ -440,8 +449,8 @@ impl Editor {
         settings["terminal.integrated.enablePersistentSessions"] = json!(false);
         settings["terminal.integrated.confirmOnKill"] = json!("never");
         fs::write(&file, serde_json::to_string_pretty(&settings)?)?;
-        hackatime(&exe, &args.kairosd, p)?;
-        let mut cmd = Command::new(&exe);
+        hackatime(exe, &args.kairosd, p)?;
+        let mut cmd = Command::new(exe);
         if named {
             cmd.arg(format!("--user-data-dir={}", data.display()));
         }
@@ -484,6 +493,9 @@ impl Drop for Editor {
         // Electron's helpers all run from the app's own folder.
         if cfg!(windows) {
             let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &self.child.id().to_string()]).output();
+            // Those that outlived it hold files in the run folder.
+            let mine = format!("Get-Process | Where-Object {{ $_.Path -like '{}\\*' }} | Stop-Process -Force", self.folder.display());
+            let _ = Command::new("powershell").args(["-NoProfile", "-Command", &mine]).output();
         } else {
             let _ = Command::new("pkill").arg("-f").arg(&self.folder).status();
         }
