@@ -14,11 +14,11 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: ""
+  CANDIDATE: "45943849165"
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^(pi|qwen-code) '
-  SYSTEMS: ''
+  ONLY: '^qwen-code '
+  SYSTEMS: 'linux macos'
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
   GITHUB_TOKEN: ${{ github.token }}
@@ -32,7 +32,7 @@ jobs:
           - { os: windows-latest, target: windows-x86_64 }
           - { os: macos-latest, target: macos-aarch64 }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,8 +85,9 @@ jobs:
           printf '#!/bin/bash\nexport PATH=%q CI=true GITHUB_TOKEN=%q ONLY=%q VERSIONS=%q RUNNER_TEMP=%q\ncd %q\nci/all.sh %s --window\n' "$PATH" "$GITHUB_TOKEN" "$ONLY" "$VERSIONS" "$RUNNER_TEMP" "$PWD" "${{ matrix.target }}" > "$RUNNER_TEMP/run.command"
           chmod +x "$RUNNER_TEMP/run.command"
           open -a Terminal "$RUNNER_TEMP/run.command"
-          for i in $(seq 3300); do [ -f failed.txt ] && break; sleep 2; done
+          for i in $(seq 6600); do [ -f failed.txt ] && break; sleep 2; done
           cat result.txt
+          [ -f failed.txt ] || { echo "the runs did not finish in 220 minutes"; exit 1; }
           exit "$(cat failed.txt)"
       # Bug 41: kairosd kept the folder it was started in, and Windows can't rename or delete a folder a process is in.
       # After the runs, which use the real home.
