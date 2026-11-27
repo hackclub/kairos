@@ -66,6 +66,8 @@ struct Sess {
     open: bool,
     /// A chunk of the response being read asked for tools.
     asked: bool,
+    /// It marks where each model call starts and ends.
+    marked: bool,
     last_ts: f64,
     reply_words: usize,
     tools: usize,
@@ -217,7 +219,10 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
             s.reply_words += d.get("content").and_then(Value::as_str).map_or(0, words);
             s.asked |= d.get("toolRequests").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
             // A reasoning model's response comes split into one message per reasoning boundary, and the turn only
-            // ends after a response that asked for no tools.
+            // ends after a response that asked for no tools. Versions before chunkIndex only say so at the call's end.
+            if s.marked {
+                return;
+            }
             let last_chunk = match (d.get("chunkIndex").and_then(Value::as_u64), d.get("chunkCount").and_then(Value::as_u64)) {
                 (Some(i), Some(n)) => i + 1 >= n,
                 _ => true,
@@ -252,6 +257,13 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
                         .unwrap_or_default();
                     s.files.extend(paths.into_iter().filter(|p| !is_plan(p)));
                 }
+            }
+        }
+        "assistant.turn_start" => s.marked = true,
+        "assistant.turn_end" => {
+            s.last_ts = ts;
+            if s.marked && !std::mem::take(&mut s.asked) {
+                s.close(ts, out);
             }
         }
         "abort" | "session.task_complete" => s.close(ts, out),
@@ -375,6 +387,35 @@ mod tests {
         let out = run(&[START, USER, &ask, say, TOOL, DONE_TOOL, FINAL]);
         assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
         assert_eq!(out[2].ts - out[0].ts, 60.0);
+    }
+
+    #[test]
+    fn without_chunk_numbers_the_turn_ends_with_the_call_that_asked_for_no_tools() {
+        let call = |n: u32, at: &str| format!(r#"{{"type":"assistant.turn_{at}","timestamp":"2026-11-19T10:00:{n:02}Z","data":{{"turnId":"0"}}}}"#);
+        let say = |n: u32, tools: &str| {
+            format!(r#"{{"type":"assistant.message","timestamp":"2026-11-19T10:00:{n:02}Z","data":{{"messageId":"m{n}","content":"","toolRequests":[{tools}]}}}}"#)
+        };
+        let ask = r#"{"toolCallId":"t1","name":"edit"}"#;
+        let tool = TOOL.replace("10:00:04", "10:00:13");
+        let done = DONE_TOOL.replace("10:00:05", "10:00:14");
+        let lines = [
+            START.to_string(),
+            USER.to_string(),
+            call(10, "start"),
+            say(11, ""),
+            say(12, ask),
+            tool,
+            done,
+            call(15, "end"),
+            call(16, "start"),
+            say(17, ""),
+            say(18, ""),
+            call(19, "end"),
+        ];
+        let out = run(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
+        assert_eq!(out[2].ts, out[0].ts + 19.0);
+        assert!(matches!(out[2].kind, Kind::ReplyDone { tools: 1, .. }));
     }
 
     #[test]
