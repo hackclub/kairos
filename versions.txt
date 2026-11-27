@@ -23,3 +23,7 @@ codex latest two
 opencode 1.x two
 opencode 2.x two
 antigravity latest two
+claude-code latest tmux
+codex latest tmux
+opencode 2.x tmux
+antigravity latest tmux

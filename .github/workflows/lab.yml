@@ -19,7 +19,7 @@ env:
   # macos). Empty means all.
   ONLY: ""
   SYSTEMS: ""
-  # The list of runs: versions.txt, or ci/mux.txt for the tmux and screen runs.
+  # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
