@@ -44,6 +44,8 @@ pub struct Want {
     /// Kairos counts the agent as started at its first tool call.
     pub starts: usize,
     pub edits: Vec<(String, usize, usize)>,
+    /// The edits that wrote a whole file.
+    pub writes: Vec<(String, usize, usize)>,
     pub commits: usize,
     pub reply_words: usize,
     pub tools: usize,
@@ -52,11 +54,14 @@ pub struct Want {
 
 impl Turn {
     pub fn want(&self) -> Want {
-        let mut edits = Vec::new();
+        let (mut edits, mut writes) = (Vec::new(), Vec::new());
         let (mut commits, mut asks) = (0, 0);
         for a in &self.acts {
             match a {
-                Act::Write { path, content } => edits.push((path.to_string(), content.lines().count(), 0)),
+                Act::Write { path, content } => {
+                    edits.push((path.to_string(), content.lines().count(), 0));
+                    writes.push((path.to_string(), content.lines().count(), 0));
+                }
                 Act::Edit { path, old, new } => edits.push((path.to_string(), new.lines().count(), old.lines().count())),
                 Act::Shell { cmd } => commits += usize::from(cmd.contains("git commit")),
                 Act::Asked { .. } => asks += 1,
@@ -75,6 +80,7 @@ impl Turn {
             starts: usize::from(!self.acts.is_empty()),
             files: files.len(),
             edits,
+            writes,
             commits,
             // An interrupted turn never gets its closing text.
             reply_words: if self.interrupt { 0 } else { self.say.split_whitespace().count() },

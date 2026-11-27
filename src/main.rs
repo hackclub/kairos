@@ -389,7 +389,9 @@ fn check_session(
         problems.dedup();
         differ(&mut problems, n, "agent_start count", &json!(of("agent_start").len()), json!(want.starts));
         let edits: Vec<Value> = of("agent_edit").iter().map(|e| json!([e["path"], e["added"], e["removed"]])).collect();
-        differ(&mut problems, n, "agent edits [path, added, removed]", &json!(edits), json!(want.edits));
+        // Pi logs a whole-file write without its lines, so Kairos can't tell a new file from one written over.
+        let want_edits: Vec<_> = want.edits.iter().filter(|e| h.counts_writes || !want.writes.contains(e)).collect();
+        differ(&mut problems, n, "agent edits [path, added, removed]", &json!(edits), json!(want_edits));
         let commits = of("agent_commit");
         differ(&mut problems, n, "agent_commit count", &json!(commits.len()), json!(want.commits));
         for c in commits {
@@ -412,7 +414,8 @@ fn check_session(
         differ(&mut problems, n, "reply_done count", &json!(done.len()), json!(1));
         if let Some(d) = done.first() {
             differ(&mut problems, n, "reply_done.reply_words", &d["reply_words"], json!(want.reply_words));
-            differ(&mut problems, n, "reply_done.tools", &d["tools"], json!(want.tools));
+            let reads = if h.reads_first { want.edits.len() - want.writes.len() } else { 0 };
+            differ(&mut problems, n, "reply_done.tools", &d["tools"], json!(want.tools + reads));
             differ(&mut problems, n, "reply_done.files_changed", &d["files_changed"], json!(want.files));
             if let Some(pressed) = esc.get(i).copied().flatten() {
                 let off = d["ts"].as_f64().unwrap_or(0.0) - pressed;
@@ -551,6 +554,10 @@ const KNOWN: &[Known] = &[
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "something came after reply_done" },
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "the interrupted reply ended" },
     Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "credit came while nobody had touched anything" },
+    Known { bug: 52, harness: "codex-app", fixed: "", text: "came with app null in front" },
+    Known { bug: 53, harness: "qwen-code", fixed: "", text: "agent_commit count is 0" },
+    Known { bug: 53, harness: "qwen-code", fixed: "", text: "reply_done.files_changed is" },
+    Known { bug: 53, harness: "qwen-code", fixed: "", text: "prompt.words is" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
@@ -788,7 +795,7 @@ fn run() -> Result<bool> {
     let all = events(kd)?;
     let mine: Vec<Value> = all.iter().filter(|e| e["harness"] == h.id).cloned().collect();
     let mut problems = model.problems();
-    problems.extend(check(h, Some(&version), &scenario, &done.esc, &all, project)?);
+    problems.extend(check(h, h.writes_version.then_some(version.as_str()), &scenario, &done.esc, &all, project)?);
     let mut summary = None;
     if args.window {
         problems.extend(front(&all, h.id, "agent_terminal", &done.closed));

@@ -47,6 +47,12 @@ pub struct Harness {
     pub marks_since: Option<&'static str>,
     /// It writes down when the person pressed Esc. agy doesn't, so Kairos ends that turn at the last step it saw.
     pub writes_esc: bool,
+    /// Its log names its own version. Pi's doesn't.
+    pub writes_version: bool,
+    /// Its log has the lines of a whole-file write.
+    pub counts_writes: bool,
+    /// It edits only a file it has read in this session, so each scripted edit takes a read too.
+    pub reads_first: bool,
     pub prepare: fn(home: &Path, project: &Path, model_url: &str, version: &str) -> Result<Launch>,
 }
 
@@ -79,6 +85,9 @@ pub const ALL: &[Harness] = &[
         // 2.0 keeps no record of a permission prompt, and puts a 20 line paste in the prompt as it is.
         marks_since: Some("2.1.0"),
         writes_esc: true,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: claude,
     },
     Harness {
@@ -93,6 +102,9 @@ pub const ALL: &[Harness] = &[
         during: &[],
         marks_since: None,
         writes_esc: true,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: codex,
     },
     Harness {
@@ -107,6 +119,9 @@ pub const ALL: &[Harness] = &[
         during: &[],
         marks_since: None,
         writes_esc: true,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: opencode,
     },
     Harness {
@@ -124,6 +139,9 @@ pub const ALL: &[Harness] = &[
         during: &[],
         marks_since: None,
         writes_esc: false,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: antigravity,
     },
     Harness {
@@ -137,6 +155,9 @@ pub const ALL: &[Harness] = &[
         during: &[],
         marks_since: None,
         writes_esc: true,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: copilot,
     },
     // VS Code's own chat, which runs on the Copilot CLI's runtime. Only the vscode app uses it.
@@ -151,7 +172,43 @@ pub const ALL: &[Harness] = &[
         during: &[],
         marks_since: None,
         writes_esc: true,
+        writes_version: true,
+        counts_writes: true,
+        reads_first: false,
         prepare: copilot,
+    },
+    Harness {
+        id: "pi",
+        source: Source::Npm("@earendil-works/pi-coding-agent"),
+        bin: "pi",
+        stores: &[".pi/agent/sessions"],
+        state: &[".pi"],
+        first_run: &[(&["Trust project folder?", "→ Trust"], &[ENTER])],
+        // The footer under its prompt box, with the context used of the model's 128k.
+        ready: &["/128k"],
+        during: &[],
+        marks_since: None,
+        writes_esc: true,
+        writes_version: false,
+        counts_writes: false,
+        reads_first: false,
+        prepare: pi,
+    },
+    Harness {
+        id: "qwen-code",
+        source: Source::Npm("@qwen-code/qwen-code"),
+        bin: "qwen",
+        stores: &[".qwen/projects"],
+        state: &[".qwen"],
+        first_run: &[],
+        ready: &["Type your message or @path/to/file"],
+        during: &[],
+        marks_since: None,
+        writes_esc: false,
+        writes_version: false,
+        counts_writes: true,
+        reads_first: true,
+        prepare: qwen,
     },
 ];
 
@@ -227,6 +284,30 @@ fn copilot(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Re
     ];
     let args = vec!["--allow-all-tools".to_string()];
     Ok(Launch { args: args.clone(), resume: args.into_iter().chain(["--continue".to_string()]).collect(), env: vars(&env), after: Vec::new() })
+}
+
+fn pi(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+    let dir = home.join(".pi").join("agent");
+    fs::create_dir_all(&dir)?;
+    let lab = json!({ "baseUrl": format!("{model_url}/v1"), "api": "openai-completions", "apiKey": "lab", "models": [{ "id": "test-model" }] });
+    fs::write(dir.join("models.json"), serde_json::to_string_pretty(&json!({ "providers": { "lab": lab } }))?)?;
+    fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&json!({ "defaultProvider": "lab", "defaultModel": "test-model" }))?)?;
+    // Offline it fetches no model list or tools at start.
+    let env = [("PI_OFFLINE", "1"), ("PI_SKIP_VERSION_CHECK", "1"), ("PI_TELEMETRY", "0")];
+    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new() })
+}
+
+fn qwen(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
+    let dir = home.join(".qwen");
+    fs::create_dir_all(&dir)?;
+    // Picking the OpenAI kind of key up front keeps it from asking how to sign in.
+    let settings = json!({ "security": { "auth": { "selectedType": "openai" } }, "model": { "name": "test-model" } });
+    fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
+    let base = format!("{model_url}/v1");
+    let env = [("OPENAI_API_KEY", "lab"), ("OPENAI_BASE_URL", base.as_str()), ("OPENAI_MODEL", "test-model")];
+    let args = vec!["--yolo".to_string()];
+    let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
 }
 
 fn antigravity(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {

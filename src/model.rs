@@ -350,19 +350,19 @@ fn responses(state: &Mutex<State>, lane: Option<usize>, body: &Value, side: bool
 }
 
 /// A chat completions tool call, by the tool and argument names this version offers (OpenCode 1.x says `bash` and
-/// `filePath`, agy `run_command` and `Path`).
+/// `filePath`, agy `run_command` and `Path`, Qwen Code `run_shell_command` and `file_path`).
 fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)> {
     let find = |names: &[&str]| names.iter().find_map(|n| tools.iter().find(|t| t["name"] == *n));
     let key = |tool: &Value, names: &[&str]| names.iter().find(|n| tool["parameters"]["properties"].get(**n).is_some()).map(|n| n.to_string());
     let file = |path: &str| json!(project.join(path).to_string_lossy());
-    const PATH: &[&str] = &["path", "filePath", "Path"];
+    const PATH: &[&str] = &["path", "filePath", "Path", "file_path"];
     let (tool, wants): (&Value, Vec<(&[&str], Value)>) = match act {
         Act::Write { path, content } => (find(&["write", "write_file", "create"])?, vec![(PATH, file(path)), (&["content", "Content", "file_text"], json!(content))]),
         Act::Edit { path, old, new } => (
-            find(&["edit", "edit_file"])?,
-            vec![(PATH, file(path)), (&["oldString", "Target", "old_str"], json!(old)), (&["newString", "Replacement", "new_str"], json!(new))],
+            find(&["edit", "edit_file", "replace"])?,
+            vec![(PATH, file(path)), (&["oldString", "Target", "old_str", "old_string"], json!(old)), (&["newString", "Replacement", "new_str", "new_string"], json!(new))],
         ),
-        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash", "powershell", "run_command"])?, vec![(&["command", "CommandLine"], json!(cmd))]),
+        Act::Shell { cmd } | Act::Asked { cmd } => (find(&["shell", "bash", "powershell", "run_command", "run_shell_command"])?, vec![(&["command", "CommandLine"], json!(cmd))]),
     };
     // Copilot CLI's `create` won't make a missing folder, where a model would first run mkdir.
     if let (Act::Write { path, .. }, true) = (act, tool["name"] == "create") {
@@ -374,6 +374,10 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
     for (names, value) in wants {
         args[key(tool, names).unwrap_or_else(|| names[0].to_string())] = value;
     }
+    // Pi takes a list of replacements.
+    if let (Act::Edit { path, old, new }, true) = (act, key(tool, &["edits"]).is_some()) {
+        args = json!({ "path": file(path), "edits": [{ "oldText": old, "newText": new }] });
+    }
     // agy turns its command away without a summary and a wait before it goes to the background.
     for (name, value) in [("description", json!("Run the scripted command")), ("toolSummary", json!("Run the scripted command")), ("WaitMsBeforeAsync", json!(30000))] {
         if key(tool, &[name]).is_some() {
@@ -381,6 +385,20 @@ fn chat_call(tools: &[Value], act: Act, project: &Path) -> Option<(Value, Value)
         }
     }
     Some((tool["name"].clone(), args))
+}
+
+/// Qwen Code edits only a file it has read in this session, so before each edit the model reads the file, as a real one
+/// would.
+fn read_first(tools: &[Value], id: &str, act: Act, project: &Path, answered: &[String]) -> Option<Value> {
+    let Act::Edit { path, .. } = act else { return None };
+    let read = tools.iter().find(|t| t["name"] == "read_file")?;
+    let call = format!("call_{id}_read");
+    if answered.contains(&call) {
+        return None;
+    }
+    let key = ["file_path", "absolute_path", "path"].into_iter().find(|k| read["parameters"]["properties"].get(*k).is_some()).unwrap_or("file_path");
+    let args = json!({ key: project.join(path).to_string_lossy() });
+    Some(json!({ "index": 0, "id": call, "type": "function", "function": { "name": "read_file", "arguments": args.to_string() } }))
 }
 
 fn chat(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static str, String, String) {
@@ -398,16 +416,19 @@ fn chat(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static st
         Plan::Side => ("side".to_string(), text("ok")),
         Plan::Stall => ("stall".to_string(), text("ok")),
         Plan::Say(t) => ("say".to_string(), text(&t)),
-        Plan::Act(id, act) => match chat_call(&tools, act, &project) {
-            Some((name, args)) => {
-                let call = json!({ "index": 0, "id": format!("call_{id}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } });
-                (id, (json!({ "role": "assistant", "content": null, "tool_calls": [call] }), "tool_calls"))
-            }
-            None => {
-                let problem = format!("step {id}: this version offers no tool the lab knows for it: {:?}", names(&tools));
-                state.lock().unwrap().problems.push(problem);
-                (id, text("The lab has no tool for this step."))
-            }
+        Plan::Act(id, act) => match read_first(&tools, &id, act, &project, &answered) {
+            Some(call) => (format!("{id}_read"), (json!({ "role": "assistant", "content": null, "tool_calls": [call] }), "tool_calls")),
+            None => match chat_call(&tools, act, &project) {
+                Some((name, args)) => {
+                    let call = json!({ "index": 0, "id": format!("call_{id}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } });
+                    (id, (json!({ "role": "assistant", "content": null, "tool_calls": [call] }), "tool_calls"))
+                }
+                None => {
+                    let problem = format!("step {id}: this version offers no tool the lab knows for it: {:?}", names(&tools));
+                    state.lock().unwrap().problems.push(problem);
+                    (id, text("The lab has no tool for this step."))
+                }
+            },
         },
     };
     let usage = json!({ "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30 });

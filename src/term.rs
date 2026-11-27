@@ -35,20 +35,13 @@ pub fn size() -> PtySize {
 /// What a real terminal sends back when a program asks about it (cursor position, colours, device type). Codex asks
 /// all of these at startup, and a person's terminal always answers.
 fn answers(out: &[u8], (row, col): (u16, u16)) -> String {
-    let asks = |q: &[u8]| out.windows(q.len()).any(|w| w == q);
+    // Every time it was asked: Pi asks for the attributes twice in one go and waits for both answers.
+    let asks = |q: &[u8]| out.windows(q.len()).filter(|w| *w == q).count();
     let mut reply = String::new();
-    if asks(b"\x1b[6n") {
-        reply += &format!("\x1b[{};{}R", row + 1, col + 1);
-    }
-    if asks(b"\x1b]10;?") {
-        reply += "\x1b]10;rgb:ffff/ffff/ffff\x1b\\";
-    }
-    if asks(b"\x1b]11;?") {
-        reply += "\x1b]11;rgb:0000/0000/0000\x1b\\";
-    }
-    if asks(b"\x1b[c") || asks(b"\x1b[0c") {
-        reply += "\x1b[?1;2c";
-    }
+    reply += &format!("\x1b[{};{}R", row + 1, col + 1).repeat(asks(b"\x1b[6n"));
+    reply += &"\x1b]10;rgb:ffff/ffff/ffff\x1b\\".repeat(asks(b"\x1b]10;?"));
+    reply += &"\x1b]11;rgb:0000/0000/0000\x1b\\".repeat(asks(b"\x1b]11;?"));
+    reply += &"\x1b[?1;2c".repeat(asks(b"\x1b[c") + asks(b"\x1b[0c"));
     reply
 }
 
