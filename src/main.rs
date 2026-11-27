@@ -528,7 +528,7 @@ fn keep(p: &Place, stores: &[&str]) -> Result<()> {
 struct Known {
     /// Its number in BUGS.md.
     bug: u32,
-    /// Empty for every harness.
+    /// Empty for every harness, or one harness, or one harness at one version ("copilot-cli 1.0.108-0").
     harness: &'static str,
     /// The first release with the fix, empty while it is open.
     fixed: &'static str,
@@ -546,6 +546,10 @@ const KNOWN: &[Known] = &[
     Known { bug: 34, harness: "antigravity-ide", fixed: "0.1.21", text: "credit came while nobody had touched anything" },
     Known { bug: 45, harness: "copilot-cli", fixed: "0.1.24", text: "is 0, the script says" },
     Known { bug: 45, harness: "copilot-cli", fixed: "0.1.24", text: "something came after reply_done" },
+    Known { bug: 50, harness: "vscode", fixed: "", text: "Kairos saw 0 prompts, the lab typed 5" },
+    Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "is 0, the script says" },
+    Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "something came after reply_done" },
+    Known { bug: 51, harness: "copilot-cli 1.0.108-0", fixed: "", text: "the interrupted reply ended" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
@@ -565,7 +569,8 @@ fn report(name: &str, version: &str, scenario: &Scenario, kairosd: &str, mine: &
         println!("{e}");
     }
     let known = |p: &String| {
-        KNOWN.iter().find(|k| (k.harness.is_empty() || k.harness == name) && (k.fixed.is_empty() || older(kairosd, k.fixed)) && p.contains(k.text))
+        let at = format!("{name} {version}");
+        KNOWN.iter().find(|k| (k.harness.is_empty() || k.harness == name || k.harness == at) && (k.fixed.is_empty() || older(kairosd, k.fixed)) && p.contains(k.text))
     };
     // A known extra or missing prompt moves every turn after it, so those turns can't be checked.
     let shifted = problems.iter().any(|p| p.starts_with("Kairos saw") && known(p).is_some());

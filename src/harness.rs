@@ -11,6 +11,7 @@ use crate::term::{DOWN, ENTER, ESC};
 /// When every text is on screen, press the keys.
 pub type Rule = (&'static [&'static str], &'static [&'static str]);
 
+#[derive(Default)]
 pub struct Launch {
     pub args: Vec<String>,
     /// The arguments that open its last session in this folder again.
@@ -133,6 +134,20 @@ pub const ALL: &[Harness] = &[
         state: &[".copilot"],
         first_run: &[(&["Confirm folder trust", "❯ 1. Yes"], &[ENTER])],
         ready: &["/ commands · ? help"],
+        during: &[],
+        marks_since: None,
+        writes_esc: true,
+        prepare: copilot,
+    },
+    // VS Code's own chat, which runs on the Copilot CLI's runtime. Only the vscode app uses it.
+    Harness {
+        id: "copilot",
+        source: Source::Npm("@github/copilot"),
+        bin: "copilot",
+        stores: &[".copilot/session-state"],
+        state: &[".copilot"],
+        first_run: &[],
+        ready: &[],
         during: &[],
         marks_since: None,
         writes_esc: true,

@@ -17,7 +17,9 @@ t3code-opencode latest
 antigravity-ide latest
 codex-app latest
 claude-desktop latest
+copilot-cli 1.0.108-0
 copilot-cli latest
+vscode latest
 claude-code latest two
 codex latest two
 opencode 1.x two

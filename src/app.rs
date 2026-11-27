@@ -59,6 +59,8 @@ enum Source {
     Codex,
     /// Anthropic's apt repo, the Mac's feed and the Windows package list.
     Claude,
+    /// Microsoft's update service, newest only.
+    VsCode,
 }
 
 enum Drive {
@@ -68,6 +70,8 @@ enum Drive {
     Panel,
     /// The app opens the project from the link this makes and its message box takes the keys.
     Keys(fn(&Path) -> String),
+    /// Over the debugging port, in VS Code's own chat beside the editor.
+    Chat,
 }
 
 fn t3_asset(v: &str) -> String {
@@ -171,6 +175,18 @@ pub const ALL: &[App] = &[
         drive: Drive::Panel,
         pick: None,
     },
+    // VS Code's own chat, with a model of the person's own (no GitHub sign-in since 1.122). It runs the chat on the Copilot
+    // CLI's runtime and keeps it where the CLI does.
+    App {
+        id: "vscode",
+        source: Source::VsCode,
+        harness: "copilot",
+        state: &[".copilot", ".vscode", ".config/Code"],
+        stores: &[".copilot/session-state", ".config/Code/User/workspaceStorage", ".config/Code/agentSessionData"],
+        exe: |name| name == "code" || name == "Code.exe",
+        drive: Drive::Chat,
+        pick: None,
+    },
 ];
 
 pub fn find(id: &str) -> Option<&'static App> {
@@ -209,6 +225,7 @@ impl App {
             Source::Antigravity => antigravity_ide(want)?,
             Source::Codex => codex_app(want)?,
             Source::Claude => claude_desktop(want)?,
+            Source::VsCode => vs_code(want)?,
         };
         let dir = tools.join(format!("{}-{version}", self.id));
         if let Some(exe) = program(&dir, self.exe) {
@@ -236,8 +253,8 @@ impl App {
                 }
                 return Ok((exe, version));
             }
-            // A zip by another name. Windows' own tar reads zips, Git's doesn't.
-            _ if name.ends_with(".nupkg") => {
+            // A zip, or one by another name. Windows' own tar reads zips, Git's doesn't.
+            _ if cfg!(windows) && (name.ends_with(".nupkg") || name.ends_with(".zip")) => {
                 let tar = PathBuf::from(std::env::var_os("SystemRoot").context("no SystemRoot")?).join("System32").join("tar.exe");
                 output(Command::new(tar).arg("-xf").arg(&file).arg("-C").arg(&dir))?
             }
@@ -273,6 +290,94 @@ fn antigravity_ide(want: &str) -> Result<(String, String)> {
         bail!("Google only hands out the newest Antigravity IDE, {version}, not {want}");
     }
     Ok((version, url))
+}
+
+/// The newest VS Code and where to get it.
+fn vs_code(want: &str) -> Result<(String, String)> {
+    let system = match OS {
+        "linux" => "linux-x64",
+        "macos" => "darwin-universal",
+        _ => "win32-x64-archive",
+    };
+    let api = format!("https://update.code.visualstudio.com/api/update/{system}/stable/latest");
+    let latest: Value = serde_json::from_str(&output(Command::new("curl").args(["-fsSL", "--retry", "3", &api]))?).context("VS Code's update service")?;
+    let version = latest["productVersion"].as_str().context("VS Code's update service named no version")?.to_string();
+    let url = latest["url"].as_str().context("VS Code's update service gave no url")?.to_string();
+    if want != "latest" && want != version {
+        bail!("the lab only gets the newest VS Code, {version}, not {want}");
+    }
+    Ok((version, url))
+}
+
+/// Where VS Code keeps its settings and chats, and whether the lab has to name it. Windows keeps it in the runner's own
+/// AppData, which is where kairosd looks too.
+fn vscode_data(home: &Path) -> Result<(PathBuf, bool)> {
+    Ok(match OS {
+        "linux" => (home.join(".config").join("Code"), false),
+        // A macOS app finds Application Support from the account, not $HOME, and the folder's socket can't take a path
+        // longer than 103 characters, so a short one, linked to where kairosd looks in the run's home.
+        "macos" => {
+            let short = PathBuf::from(format!("/tmp/lab-code-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&short);
+            let support = home.join("Library").join("Application Support");
+            fs::create_dir_all(&support)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&short, support.join("Code"))?;
+            (short, true)
+        }
+        _ => (PathBuf::from(std::env::var_os("APPDATA").context("no APPDATA")?).join("Code"), false),
+    })
+}
+
+/// A person who brings their own model adds it in the Language Models editor, which writes chatLanguageModels.json,
+/// and lets the agent run its tools without asking each time.
+fn vscode_setup(data: &Path, model_url: &str) -> Result<()> {
+    let user = data.join("User");
+    fs::create_dir_all(&user)?;
+    let models = json!([{
+        "name": "Lab", "vendor": "customendpoint", "apiKey": "lab", "apiType": "chat-completions",
+        "models": [{ "id": "test-model", "name": "Lab Model", "url": format!("{model_url}/v1/chat/completions"),
+                     "toolCalling": true, "vision": false, "maxInputTokens": 100000, "maxOutputTokens": 8000 }],
+    }]);
+    fs::write(user.join("chatLanguageModels.json"), serde_json::to_string_pretty(&models)?)?;
+    let settings = json!({
+        "telemetry.telemetryLevel": "off",
+        "update.mode": "none",
+        "extensions.autoUpdate": false,
+        "workbench.startupEditor": "none",
+        "security.workspace.trust.enabled": false,
+        "chat.agentHost.byokModels.enabled": true,
+        "chat.tools.global.autoApprove": true,
+        "chat.tools.global.autoApprove.optIn": true,
+    });
+    fs::write(user.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
+    Ok(())
+}
+
+/// VS Code's first run: its welcome asks for a sign-in, then a theme, and the chat beside the editor picks up the model.
+fn vscode_start(port: u16) -> Result<Page> {
+    let mut page = Page::open(port, Duration::from_secs(90))?;
+    // The chat beside the editor draws before the welcome does.
+    page.wait_for(&["Continue without Signing In"], Duration::from_secs(90))?;
+    page.press("Continue without Signing In", "Get Started")?;
+    page.click("Get Started")?;
+    let picked = |page: &mut Page| -> Result<bool> { Ok(page.ax()?.iter().any(|(_, n, _)| n == "Models, Lab Model")) };
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut looked = false;
+    while !picked(&mut page)? {
+        if Instant::now() > until {
+            bail!("the chat never offered the lab's model. Page:\n{}", page.text()?);
+        }
+        // Until the person opens the list of models once, the chat shows a note about adding one.
+        if !looked && page.text()?.contains("Add Models") {
+            page.click("Add Models")?;
+            sleep(Duration::from_secs(2));
+            page.key("Escape")?;
+            looked = true;
+        }
+        sleep(Duration::from_millis(500));
+    }
+    Ok(page)
 }
 
 /// The newest Codex app. Only the Mac's feed names versions.
@@ -810,9 +915,13 @@ fn antigravity_setup(home: &Path, agy: &Path) -> Result<()> {
     Ok(())
 }
 
-fn drive(page: &mut Page, scenario: &Scenario, turns: &mut Turns) -> Result<()> {
-    let composer = "(() => { const shown = q => [...document.querySelectorAll(q)].find(e => e.getBoundingClientRect().width > 0); \
-                    return shown('[contenteditable=true]') ?? shown('textarea'); })()";
+const COMPOSER: &str = "(() => { const shown = q => [...document.querySelectorAll(q)].find(e => e.getBoundingClientRect().width > 0); \
+                        return shown('[contenteditable=true]') ?? shown('textarea'); })()";
+
+/// VS Code's message box is an editor whose own text area is a sliver at the cursor.
+const VSCODE_COMPOSER: &str = "[...document.querySelectorAll('.interactive-input-editor')].find(e => e.getBoundingClientRect().width > 0)";
+
+fn drive(page: &mut Page, composer: &str, scenario: &Scenario, turns: &mut Turns) -> Result<()> {
     let page = std::cell::RefCell::new(page);
     for (i, turn) in scenario.turns.iter().enumerate() {
         let send = |prompt: &str| -> Result<()> {
@@ -859,7 +968,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let (exe, version) = app.install(&args.version, &tools)?;
     let h = harness::find(app.harness)?;
     // People who use the app have the harness too, and the app asks it whether it is signed in.
-    let (cli, _) = h.install("latest", &tools)?;
+    let (cli, _) = if matches!(app.source, Source::VsCode) { (exe.clone(), String::new()) } else { h.install("latest", &tools)? };
     let p = crate::place(args, app.id, &version, app.state)?;
     let scenario = Arc::new(scenario::app());
     let model = Model::start(scenario.clone(), p.project.clone())?;
@@ -880,15 +989,24 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let person = Person::new(args.window)?;
     let mut daemon = crate::daemon(args, &p)?;
     sleep(Duration::from_secs(2));
-    let launch = (h.prepare)(&p.home, &p.project, &url, "latest")?;
-    let log = || OpenOptions::new().create(true).append(true).open(p.run.join("app.log"));
     let mut cmd = Command::new(&exe);
+    let launch = if matches!(app.source, Source::VsCode) {
+        let (data, named) = vscode_data(&p.home)?;
+        vscode_setup(&data, &url)?;
+        if named {
+            cmd.arg(format!("--user-data-dir={}", data.display()));
+        }
+        harness::Launch::default()
+    } else {
+        (h.prepare)(&p.home, &p.project, &url, "latest")?
+    };
+    let log = || OpenOptions::new().create(true).append(true).open(p.run.join("app.log"));
     match app.drive {
         // The Codex app opens a new thread in the folder after --open-project.
         Drive::Page if matches!(app.source, Source::Codex) => cmd.arg(format!("--remote-debugging-port={PORT}")).arg("--open-project").arg(&p.project),
         Drive::Page => cmd.arg(format!("--remote-debugging-port={PORT}")),
         // The project the way `antigravity-ide .` opens it. Basic keeps Linux from asking which keyring to use.
-        Drive::Panel => cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project),
+        Drive::Panel | Drive::Chat => cmd.arg(format!("--remote-debugging-port={PORT}")).args(["--disable-workspace-trust", "--password-store=basic"]).arg(&p.project),
         Drive::Keys(link) => cmd.arg(link(&p.project)),
     };
     if app.id == "antigravity-ide" {
@@ -941,14 +1059,21 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     };
     let drove = match app.drive {
         Drive::Page => Page::open(PORT, Duration::from_secs(90)).and_then(|mut page| {
-            let r = start(&mut page).and_then(|()| drive(&mut page, &scenario, &mut turns));
+            let r = start(&mut page).and_then(|()| drive(&mut page, COMPOSER, &scenario, &mut turns));
             if r.is_err() {
                 let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
             }
             r
         }),
         Drive::Panel => antigravity_start(PORT).and_then(|mut page| {
-            let r = drive(&mut page, &scenario, &mut turns);
+            let r = drive(&mut page, COMPOSER, &scenario, &mut turns);
+            if r.is_err() {
+                let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
+            }
+            r
+        }),
+        Drive::Chat => vscode_start(PORT).and_then(|mut page| {
+            let r = drive(&mut page, VSCODE_COMPOSER, &scenario, &mut turns);
             if r.is_err() {
                 let _ = fs::write(p.run.join("page.txt"), page.text().unwrap_or_default());
             }
@@ -1003,7 +1128,8 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     problems.extend(crate::check(h, None, &scenario, &[], &all, &p.project)?);
     let mut summary = None;
     if args.window {
-        problems.extend(crate::front(&all, h.id, "agent_app", &[]));
+        let window = if matches!(app.drive, Drive::Chat) { "editor" } else { "agent_app" };
+        problems.extend(crate::front(&all, h.id, window, &[]));
         let (wrong, said) = credit::check(&p.kd, h.id, "proj", &person, &[])?;
         problems.extend(wrong);
         summary = Some(said);
