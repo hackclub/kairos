@@ -95,7 +95,11 @@ impl Panes {
             }
         };
         stream.set_nonblocking(false)?;
-        let window = Window(line(&mut stream)?);
+        let said = line(&mut stream)?;
+        if let Some(e) = said.strip_prefix('!') {
+            bail!("the window's lab process: {e}");
+        }
+        let window = Window(said);
         Ok(Pane { stream, window })
     }
 }
@@ -115,8 +119,15 @@ fn line(stream: &mut TcpStream) -> Result<String> {
 pub fn serve(port: &str, away: &str, editor: bool) -> Result<bool> {
     std::env::set_current_dir(away)?;
     term::drain_stdin();
-    let window = if editor { Window(String::new()) } else { own(&format!("lab-pane-{port}"))? };
     let mut stream = TcpStream::connect(("127.0.0.1", port.parse::<u16>()?))?;
+    // Told to the lab, or the reason closes with this window.
+    let window = match if editor { Ok(Window(String::new())) } else { own(&format!("lab-pane-{port}")) } {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = stream.write_all(format!("!{e:#}\n").as_bytes());
+            return Err(e);
+        }
+    };
     stream.write_all(format!("{}\n", window.0).as_bytes())?;
     let spec = line(&mut stream)?;
     if spec.is_empty() {
