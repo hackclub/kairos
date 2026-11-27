@@ -329,6 +329,30 @@ fn vscode_data(home: &Path) -> Result<(PathBuf, bool)> {
     })
 }
 
+/// Install gives the person Hackatime's plugin and points WakaTime at kairosd, so the editor's own heartbeats are in the
+/// run like on a real machine.
+fn hackatime(exe: &Path, kairosd: &Path, p: &crate::Place) -> Result<()> {
+    let home = |cmd: &mut Command| {
+        cmd.env("HOME", &p.home).env("USERPROFILE", &p.home).env("KAIROS_DIR", &p.kd);
+        for k in crate::STRAY_ENV {
+            cmd.env_remove(k);
+        }
+    };
+    let mut on = Command::new(kairosd.with_file_name(if cfg!(windows) { "kairos.exe" } else { "kairos" }));
+    home(on.args(["wakatime", "on"]));
+    output(&mut on)?;
+    let dir = exe.parent().context("VS Code has no folder")?;
+    let cli = match OS {
+        "macos" => dir.parent().context("VS Code is in no bundle")?.join("Resources").join("app").join("bin").join("code"),
+        "windows" => dir.join("bin").join("code.cmd"),
+        _ => dir.join("bin").join("code"),
+    };
+    let mut add = Command::new(cli);
+    home(add.args(["--install-extension", "WakaTime.vscode-wakatime"]));
+    output(&mut add)?;
+    Ok(())
+}
+
 /// A person who brings their own model adds it in the Language Models editor, which writes chatLanguageModels.json,
 /// and lets the agent run its tools without asking each time.
 fn vscode_setup(data: &Path, model_url: &str) -> Result<()> {
@@ -1026,6 +1050,7 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let launch = if matches!(app.source, Source::VsCode) {
         let (data, named) = vscode_data(&p.home)?;
         vscode_setup(&data, &url)?;
+        hackatime(&exe, &args.kairosd, &p)?;
         if named {
             cmd.arg(format!("--user-data-dir={}", data.display()));
         }

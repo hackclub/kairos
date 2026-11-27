@@ -17,8 +17,8 @@ env:
   CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^opencode-desktop '
-  SYSTEMS: 'macos'
+  ONLY: '^vscode '
+  SYSTEMS: ''
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt
   GITHUB_TOKEN: ${{ github.token }}
@@ -47,7 +47,7 @@ jobs:
           if [ -n "$CANDIDATE" ]; then
             echo "kairosd from ci run $CANDIDATE"
             GH_TOKEN=$GITHUB_TOKEN gh run download "$CANDIDATE" -R "$GITHUB_REPOSITORY" -n "kairos-${{ matrix.target }}" -D "dist/${{ matrix.target }}"
-            chmod +x dist/${{ matrix.target }}/kairosd*
+            chmod +x dist/${{ matrix.target }}/kairos*
             exit 0
           fi
           if [ -z "$KAIROS" ]; then
