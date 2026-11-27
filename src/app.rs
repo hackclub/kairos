@@ -1145,11 +1145,6 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         println!("SKIP {}: no Linux build", app.id);
         return Ok(true);
     }
-    if app.id == "claude-desktop" && OS == "macos" {
-        // It stops right after logging "Starting app" on GitHub's Mac runners, cause not found yet (2026-11-27).
-        println!("SKIP {}: hangs at startup on the Mac runner", app.id);
-        return Ok(true);
-    }
     let tools = std::path::absolute(&args.work)?.join("tools");
     let (exe, version) = app.install(&args.version, &tools)?;
     let h = harness::find(app.harness)?;
@@ -1285,6 +1280,16 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
         screenshot(&p.run.join("screen.png"));
         if let Ok(ps) = Command::new("ps").args(["-A", "-o", "pid,stat,etime,args"]).output() {
             let _ = fs::write(p.run.join("ps.txt"), ps.stdout);
+        }
+        if OS == "macos" {
+            // Where the app's main process waits.
+            let _ = Command::new("sample").arg(child.id().to_string()).arg("3").arg("-file").arg(p.run.join("sample.txt")).output();
+            // The windows on screen, a dialog of the system's among them (the CI step builds the lister).
+            if let Some(list) = std::env::var_os("WINDOWS") {
+                if let Ok(o) = Command::new(list).output() {
+                    let _ = fs::write(p.run.join("windows.txt"), o.stdout);
+                }
+            }
         }
     }
     person.busy(false);
