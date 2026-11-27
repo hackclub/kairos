@@ -338,7 +338,8 @@ fn gemini(home: &Path, project: &Path, model_url: &str, _version: &str) -> Resul
     // A key picked up front keeps it from asking how to sign in, and the base URL sends it to the lab's model.
     let settings = json!({ "security": { "auth": { "selectedType": "gemini-api-key" } }, "general": { "disableAutoUpdate": true } });
     fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&settings)?)?;
-    let env = [("GEMINI_API_KEY", "lab"), ("GOOGLE_GEMINI_BASE_URL", model_url)];
+    // It runs headless, with no prompt, when it thinks it's in CI, and a person's computer never is.
+    let env = [("GEMINI_API_KEY", "lab"), ("GOOGLE_GEMINI_BASE_URL", model_url), ("CI", "false"), ("GITHUB_ACTIONS", "false")];
     let args = vec!["--yolo".to_string()];
     let resume = args.iter().cloned().chain(["--resume".to_string(), "latest".to_string()]).collect();
     Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
