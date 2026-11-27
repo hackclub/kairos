@@ -201,8 +201,9 @@ pub fn spawn(tx: Sender<Msg>, watch: Sender<Watch>, state_path: PathBuf, exclude
                     if let (Some(session), Some(cwd)) = (f.kind.session(), f.cwd.as_deref()) {
                         sessions.note(session, cwd);
                     }
-                    let turn_ended = matches!(f.kind, Kind::ReplyDone { .. }).then(|| claude_dir(s.harness(), &f.kind));
-                    if let Some(e) = event_of(f, s.harness(), &ex, &mut projects, &watch) {
+                    let harness = s.harness_of(&f);
+                    let turn_ended = matches!(f.kind, Kind::ReplyDone { .. }).then(|| claude_dir(harness, &f.kind));
+                    if let Some(e) = event_of(f, harness, &ex, &mut projects, &watch) {
                         let _ = tx.send(Msg::Event(e));
                     }
                     if let Some(claude) = turn_ended {

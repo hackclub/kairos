@@ -124,8 +124,9 @@ fn run() -> Result<ExitCode> {
                 s.restore(&serde_json::json!({ "since": since }));
                 for f in s.poll().into_iter().filter(|f| f.ts >= since) {
                     let project = f.cwd.as_deref().and_then(kairos_core::project::project_of).map(|p| p.id);
+                    let harness = s.harness_of(&f).to_string();
                     let mut e = kairos_core::event::Event::new(f.ts, project, f.kind);
-                    e.harness = Some(s.harness().to_string());
+                    e.harness = Some(harness);
                     println!("{}", serde_json::to_string(&e)?);
                 }
             }

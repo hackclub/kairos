@@ -39,6 +39,15 @@ fn session_of(path: &Path) -> String {
     p.and_then(Path::file_stem).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+// VS Code's chat runs on the same runtime and keeps its sessions here too. The session's workspace.yaml names the
+// client that last opened it (the CLI says github/cli).
+fn in_vscode(events: &Path) -> bool {
+    let Some(dir) = events.parent().filter(|_| events.file_name().is_some_and(|n| n == "events.jsonl")) else { return false };
+    fs::read_to_string(dir.join("workspace.yaml")).is_ok_and(|y| {
+        y.lines().any(|l| l.strip_prefix("last_client_name:").is_some_and(|v| v.trim().trim_matches(['"', '\'']) == "vscode-agent-host"))
+    })
+}
+
 fn is_plan(p: &str) -> bool {
     let p = p.replace('\\', "/");
     p.contains(".copilot/session-state/") && p.ends_with("/plan.md")
@@ -47,6 +56,8 @@ fn is_plan(p: &str) -> bool {
 #[derive(Default)]
 struct Sess {
     known: bool,
+    path: PathBuf,
+    vscode: bool,
     session: String,
     cwd: Option<PathBuf>,
     model: Option<String>,
@@ -66,6 +77,8 @@ impl Sess {
     // Tail skips history on first run, so read session.start from the head of the file.
     fn head(&mut self, path: &Path) {
         self.known = true;
+        self.path = path.to_path_buf();
+        self.vscode = in_vscode(path);
         self.session = session_of(path);
         let mut line = String::new();
         let Ok(f) = File::open(path) else { return };
@@ -174,6 +187,8 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
             if words == 0 {
                 return;
             }
+            // A session can be picked up again in the other one.
+            s.vscode = in_vscode(&s.path);
             let last = s.last_ts;
             s.close(last.min(ts), out);
             s.armed = true;
@@ -266,6 +281,15 @@ impl Source for CopilotCli {
 
     fn harness(&self) -> &'static str {
         "copilot-cli"
+    }
+
+    fn harness_of(&self, found: &Found) -> &'static str {
+        let id = found.kind.session();
+        if self.sessions.values().any(|s| s.vscode && Some(s.session.as_str()) == id) {
+            "copilot"
+        } else {
+            self.harness()
+        }
     }
 
     fn poll(&mut self) -> Vec<Found> {
@@ -394,6 +418,31 @@ mod tests {
         let out = again.poll();
         assert_eq!(names(&out), ["prompt"]);
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/w/p")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_vs_code_last_opened_is_vs_code_chat() {
+        let dir = std::env::temp_dir().join(format!("kairos-copilot-vscode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let f = dir.join("cli-1/events.jsonl");
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        let yaml = |client: &str| fs::write(dir.join("cli-1/workspace.yaml"), format!("id: cli-1\ncwd: /w/p\nlast_client_name: {client}\n")).unwrap();
+        yaml("vscode-agent-host");
+        fs::write(&f, format!("{START}\n")).unwrap();
+        let mut src = CopilotCli::new(vec![dir.clone()]);
+        assert!(src.poll().is_empty());
+        fs::write(&f, format!("{START}\n{USER}\n{FINAL}\n")).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt", "reply_done"]);
+        assert!(out.iter().all(|f| src.harness_of(f) == "copilot"));
+
+        yaml("github/cli");
+        let next = USER.replace("10:00:00", "10:05:00");
+        fs::write(&f, format!("{START}\n{USER}\n{FINAL}\n{next}\n")).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt"]);
+        assert_eq!(src.harness_of(&out[0]), "copilot-cli");
         let _ = fs::remove_dir_all(&dir);
     }
 
