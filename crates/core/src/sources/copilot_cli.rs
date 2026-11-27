@@ -39,6 +39,15 @@ fn session_of(path: &Path) -> String {
     p.and_then(Path::file_stem).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+// VS Code's chat runs on the same runtime and keeps its sessions here too. The session's workspace.yaml names the
+// client that last opened it (the CLI says github/cli).
+fn in_vscode(events: &Path) -> bool {
+    let Some(dir) = events.parent().filter(|_| events.file_name().is_some_and(|n| n == "events.jsonl")) else { return false };
+    fs::read_to_string(dir.join("workspace.yaml")).is_ok_and(|y| {
+        y.lines().any(|l| l.strip_prefix("last_client_name:").is_some_and(|v| v.trim().trim_matches(['"', '\'']) == "vscode-agent-host"))
+    })
+}
+
 fn is_plan(p: &str) -> bool {
     let p = p.replace('\\', "/");
     p.contains(".copilot/session-state/") && p.ends_with("/plan.md")
@@ -47,6 +56,8 @@ fn is_plan(p: &str) -> bool {
 #[derive(Default)]
 struct Sess {
     known: bool,
+    path: PathBuf,
+    vscode: bool,
     session: String,
     cwd: Option<PathBuf>,
     model: Option<String>,
@@ -55,6 +66,8 @@ struct Sess {
     open: bool,
     /// A chunk of the response being read asked for tools.
     asked: bool,
+    /// It marks where each model call starts and ends.
+    marked: bool,
     last_ts: f64,
     reply_words: usize,
     tools: usize,
@@ -66,6 +79,8 @@ impl Sess {
     // Tail skips history on first run, so read session.start from the head of the file.
     fn head(&mut self, path: &Path) {
         self.known = true;
+        self.path = path.to_path_buf();
+        self.vscode = in_vscode(path);
         self.session = session_of(path);
         let mut line = String::new();
         let Ok(f) = File::open(path) else { return };
@@ -174,6 +189,8 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
             if words == 0 {
                 return;
             }
+            // A session can be picked up again in the other one.
+            s.vscode = in_vscode(&s.path);
             let last = s.last_ts;
             s.close(last.min(ts), out);
             s.armed = true;
@@ -202,7 +219,10 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
             s.reply_words += d.get("content").and_then(Value::as_str).map_or(0, words);
             s.asked |= d.get("toolRequests").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
             // A reasoning model's response comes split into one message per reasoning boundary, and the turn only
-            // ends after a response that asked for no tools.
+            // ends after a response that asked for no tools. Versions before chunkIndex only say so at the call's end.
+            if s.marked {
+                return;
+            }
             let last_chunk = match (d.get("chunkIndex").and_then(Value::as_u64), d.get("chunkCount").and_then(Value::as_u64)) {
                 (Some(i), Some(n)) => i + 1 >= n,
                 _ => true,
@@ -239,6 +259,13 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
                 }
             }
         }
+        "assistant.turn_start" => s.marked = true,
+        "assistant.turn_end" => {
+            s.last_ts = ts;
+            if s.marked && !std::mem::take(&mut s.asked) {
+                s.close(ts, out);
+            }
+        }
         "abort" | "session.task_complete" => s.close(ts, out),
         "session.shutdown" | "session.error" => {
             let last = s.last_ts;
@@ -266,6 +293,15 @@ impl Source for CopilotCli {
 
     fn harness(&self) -> &'static str {
         "copilot-cli"
+    }
+
+    fn harness_of(&self, found: &Found) -> &'static str {
+        let id = found.kind.session();
+        if self.sessions.values().any(|s| s.vscode && Some(s.session.as_str()) == id) {
+            "copilot"
+        } else {
+            self.harness()
+        }
     }
 
     fn poll(&mut self) -> Vec<Found> {
@@ -354,6 +390,35 @@ mod tests {
     }
 
     #[test]
+    fn without_chunk_numbers_the_turn_ends_with_the_call_that_asked_for_no_tools() {
+        let call = |n: u32, at: &str| format!(r#"{{"type":"assistant.turn_{at}","timestamp":"2026-11-19T10:00:{n:02}Z","data":{{"turnId":"0"}}}}"#);
+        let say = |n: u32, tools: &str| {
+            format!(r#"{{"type":"assistant.message","timestamp":"2026-11-19T10:00:{n:02}Z","data":{{"messageId":"m{n}","content":"","toolRequests":[{tools}]}}}}"#)
+        };
+        let ask = r#"{"toolCallId":"t1","name":"edit"}"#;
+        let tool = TOOL.replace("10:00:04", "10:00:13");
+        let done = DONE_TOOL.replace("10:00:05", "10:00:14");
+        let lines = [
+            START.to_string(),
+            USER.to_string(),
+            call(10, "start"),
+            say(11, ""),
+            say(12, ask),
+            tool,
+            done,
+            call(15, "end"),
+            call(16, "start"),
+            say(17, ""),
+            say(18, ""),
+            call(19, "end"),
+        ];
+        let out = run(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(names(&out), ["prompt", "agent_start", "reply_done"]);
+        assert_eq!(out[2].ts, out[0].ts + 19.0);
+        assert!(matches!(out[2].kind, Kind::ReplyDone { tools: 1, .. }));
+    }
+
+    #[test]
     fn mid_turn_prompt_and_abort_close_the_turn() {
         let next = USER.replace("10:00:00", "10:00:30");
         let out = run(&[START, USER, ASK, TOOL, &next]);
@@ -394,6 +459,31 @@ mod tests {
         let out = again.poll();
         assert_eq!(names(&out), ["prompt"]);
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/w/p")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_vs_code_last_opened_is_vs_code_chat() {
+        let dir = std::env::temp_dir().join(format!("kairos-copilot-vscode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let f = dir.join("cli-1/events.jsonl");
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        let yaml = |client: &str| fs::write(dir.join("cli-1/workspace.yaml"), format!("id: cli-1\ncwd: /w/p\nlast_client_name: {client}\n")).unwrap();
+        yaml("vscode-agent-host");
+        fs::write(&f, format!("{START}\n")).unwrap();
+        let mut src = CopilotCli::new(vec![dir.clone()]);
+        assert!(src.poll().is_empty());
+        fs::write(&f, format!("{START}\n{USER}\n{FINAL}\n")).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt", "reply_done"]);
+        assert!(out.iter().all(|f| src.harness_of(f) == "copilot"));
+
+        yaml("github/cli");
+        let next = USER.replace("10:00:00", "10:05:00");
+        fs::write(&f, format!("{START}\n{USER}\n{FINAL}\n{next}\n")).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt"]);
+        assert_eq!(src.harness_of(&out[0]), "copilot-cli");
         let _ = fs::remove_dir_all(&dir);
     }
 

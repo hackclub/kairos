@@ -4,6 +4,9 @@
 use anyhow::Result;
 use deadpool_postgres::GenericClient;
 
+use crate::credit::todays;
+use crate::util::now;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Period {
     Today,
@@ -38,18 +41,17 @@ pub struct Entry {
 }
 
 pub async fn top(c: &impl GenericClient, period: Period, limit: i64) -> Result<Vec<Entry>> {
+    let (zones, days, utc) = todays(now());
     let rows = c
         .query(
             "SELECT u.id, u.username, u.display_name, u.avatar_url, sum(d.seconds) AS secs
              FROM user_days d JOIN users u ON u.id = d.user_id
-             -- A zone name Postgres doesn't know would fail the whole query, so it falls back to UTC.
-             LEFT JOIN pg_timezone_names z ON z.name = u.timezone
+             LEFT JOIN unnest($3::text[], $4::date[]) AS z(name, today) ON z.name = u.timezone
              WHERE u.is_public AND u.trust <> 'banned' AND d.class <> 'agent'
-               AND d.day > (now() AT TIME ZONE coalesce(z.name, 'UTC'))::date - $1::int
-               AND d.day <= (now() AT TIME ZONE coalesce(z.name, 'UTC'))::date
+               AND d.day > coalesce(z.today, $5) - $1::int AND d.day <= coalesce(z.today, $5)
              GROUP BY u.id HAVING sum(d.seconds) >= 60
              ORDER BY secs DESC, u.id LIMIT $2",
-            &[&period.days(), &limit],
+            &[&period.days(), &limit, &zones, &days, &utc],
         )
         .await?;
     Ok(rows

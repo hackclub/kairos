@@ -104,7 +104,8 @@ pub fn is_opencode_desktop(name: &str, wclass: &str) -> bool {
 }
 
 const CLAUDE_DESKTOP: &[&str] = &["claude-desktop", "com.anthropic.claude", "com.anthropic.claudefordesktop"];
-const CODEX_APP: &[&str] = &["codex", "com.openai.codex"];
+// On Windows the app is ChatGPT.exe in the package OpenAI.Codex.
+const CODEX_APP: &[&str] = &["codex", "com.openai.codex", "openai.codex"];
 
 /// Which agent app an `agent_app` window belongs to, for the ones whose logs say a prompt was typed in them.
 pub fn agent_app(name: &str, wclass: &str) -> Option<App> {
@@ -262,6 +263,7 @@ fn is_agent_cli<P: Procs>(p: &P, pid: u32) -> bool {
                 || a.contains("/@openai/codex")
                 || a.contains("/opencode-ai/")
                 || a.contains("/@earendil-works/pi-coding-agent/")
+                || a.contains("/@qwen-code/qwen-code/")
                 || a.ends_with("/ui-tui/dist/entry.js")
                 || a.ends_with("/hermes_cli/tui_dist/entry.js")
                 || Path::new(&a)
@@ -676,6 +678,7 @@ mod tests {
             "C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js",
             "C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode",
             "C:\\Users\\a\\.pi\\agent\\install\\releases\\1.6.0\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js",
+            "C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\@qwen-code\\qwen-code\\cli.js",
             "C:\\Users\\a\\AppData\\Local\\hermes\\hermes-agent\\ui-tui\\dist\\entry.js"]
         {
             let f = Fake::new(&[(10, 1, "WindowsTerminal.exe"), (12, 10, "cmd.exe"), (13, 12, "node.exe")])
@@ -978,6 +981,8 @@ mod tests {
             ("chatgpt", "com.openai.codex", Some(App::CodexApp)),
             ("codex", "", Some(App::CodexApp)),
             ("chatgpt", "com.openai.chat", None),
+            ("chatgpt", "OpenAI.Codex_2p2nqsd0c76g0", Some(App::CodexApp)),
+            ("chatgpt", "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0", None),
             ("ai.opencode", "ai.opencode.desktop", Some(App::OpencodeDesktop)),
             ("opencode", "", Some(App::OpencodeDesktop)),
             ("t3code", "com.t3tools.t3code", None),

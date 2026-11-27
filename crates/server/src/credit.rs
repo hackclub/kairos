@@ -34,6 +34,13 @@ pub fn local_day(tz: Tz, t: f64) -> NaiveDate {
     DateTime::from_timestamp(t.floor() as i64, 0).map_or(NaiveDate::MIN, |d| d.with_timezone(&tz).date_naive())
 }
 
+/// Today in every zone chrono-tz knows, for a query to look up by the person's zone name, and today in UTC for any other.
+/// Postgres doesn't know every name browsers report (prod's has no Asia/Calcutta), so a query can't work it out itself.
+pub fn todays(t: f64) -> (Vec<&'static str>, Vec<NaiveDate>, NaiveDate) {
+    let zones = chrono_tz::TZ_VARIANTS.iter();
+    (zones.clone().map(|z| z.name()).collect(), zones.map(|&z| local_day(z, t)).collect(), local_day(chrono_tz::UTC, t))
+}
+
 /// Local midnight, or the first valid local time after it on DST-gap days.
 pub fn day_start(tz: Tz, d: NaiveDate) -> f64 {
     for h in 0..4 {

@@ -73,6 +73,10 @@ fn turns(doc: &Value) -> Vec<Turn> {
         match m.get("type").and_then(Value::as_str) {
             Some("user") => {
                 let prompt = text_of(m.get("content"));
+                // Context the CLI adds on its own (0.71 saves it), which it also skips when resuming.
+                if ["<session_context>", "<hook_context>"].iter().any(|tag| prompt.trim_start().starts_with(tag)) {
+                    continue;
+                }
                 let (w, pasted) = prompt_stats(&prompt);
                 if w == 0 {
                     continue;
@@ -109,6 +113,14 @@ fn turns(doc: &Value) -> Vec<Turn> {
                     t.done = Some(ts);
                 }
             }
+            // What the CLI notes when the person stops a reply with Esc.
+            Some("info") if text_of(m.get("content")) == "Request cancelled." => {
+                if let Some(t) = out.last_mut().filter(|t| t.done.is_none()) {
+                    t.files = files.len();
+                    t.done = Some(ts);
+                    last = ts;
+                }
+            }
             _ => {}
         }
     }
@@ -140,8 +152,10 @@ fn agent_work(doc: &Value, session: &str, cwd: Option<&Path>) -> Vec<Found> {
                 }
             } else if SHELL_TOOLS.contains(&name) {
                 let Some(cmd) = c.pointer("/args/command").and_then(Value::as_str).filter(|c| c.contains("commit")) else { continue };
+                let screen = rd.and_then(screen_text);
                 let output = rd
                     .and_then(Value::as_str)
+                    .or(screen.as_deref())
                     .or_else(|| c.pointer("/result/0/functionResponse/response/output").and_then(Value::as_str))
                     .unwrap_or("");
                 let cmd = match c.pointer("/args/dir_path").and_then(Value::as_str) {
@@ -154,6 +168,15 @@ fn agent_work(doc: &Value, session: &str, cwd: Option<&Path>) -> Vec<Found> {
     }
     out.sort_by(|a, b| a.ts.total_cmp(&b.ts));
     out
+}
+
+// 0.71 keeps a command's output as the terminal showed it: a list of lines, each a list of styled pieces.
+fn screen_text(rd: &Value) -> Option<String> {
+    let lines = rd.as_array()?.iter().map(|line| {
+        let text: String = line.as_array().into_iter().flatten().filter_map(|p| p.get("text").and_then(Value::as_str)).collect();
+        text.trim_end().to_string()
+    });
+    Some(lines.collect::<Vec<_>>().join("\n")).filter(|t| !t.trim().is_empty())
 }
 
 pub struct Gemini {
@@ -217,7 +240,8 @@ impl Source for Gemini {
                 continue;
             }
             let Ok(text) = fs::read_to_string(&path) else { continue };
-            let doc = if path.extension().is_some_and(|e| e == "jsonl") {
+            let jsonl = path.extension().is_some_and(|e| e == "jsonl");
+            let doc = if jsonl {
                 replay(&text)
             } else {
                 match serde_json::from_str::<Value>(&text) {
@@ -226,9 +250,12 @@ impl Source for Gemini {
                 }
             };
             drop(text);
+            // A .jsonl file names its session in a header line, and again in a `$set` only once it's resumed, so the
+            // file name is the key that stays the same.
             let session = doc
                 .get("sessionId")
                 .and_then(Value::as_str)
+                .filter(|_| !jsonl)
                 .map(str::to_string)
                 .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
                 .unwrap_or_default();
@@ -329,7 +356,7 @@ mod tests {
         let out = src.poll();
         assert_eq!(names(&out), ["prompt", "agent_start"]);
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/w/p")));
-        assert!(matches!(&out[0].kind, Kind::Prompt { session, words: 7, .. } if session == "g1"));
+        assert!(matches!(&out[0].kind, Kind::Prompt { session, words: 7, .. } if session == "session-1"));
 
         let mut again = Gemini::new(dir.clone());
         again.restore(&src.state());
@@ -338,6 +365,45 @@ mod tests {
         let out = again.poll();
         assert_eq!(names(&out), ["reply_done"]);
         assert!(matches!(&out[0].kind, Kind::ReplyDone { reply_words: 7, tools: 2, files_changed: 1, .. }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gemini_0_71_sessions_keep_their_key_skip_added_context_and_end_at_esc() {
+        let dir = std::env::temp_dir().join(format!("kairos-gemini-71-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let chats = dir.join("tmp/slug1/chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(dir.join("projects.json"), r#"{"projects":{"/w/p":"slug1"}}"#).unwrap();
+        let f = chats.join("session-2.jsonl");
+        let mut text = format!("{}\n", json!({ "sessionId": "g2", "projectHash": "h", "startTime": iso(1_000.0), "lastUpdated": iso(1_000.0), "kind": "main" }));
+        fs::write(&f, &text).unwrap();
+        let mut src = Gemini::new(dir.clone());
+        assert!(src.poll().is_empty());
+
+        let t0 = now().ceil() + 2.0;
+        let context = "<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\nMy operating system is: linux";
+        let shell = json!([{ "id": "c3", "name": "run_shell_command", "status": "success", "timestamp": iso(t0 + 12.0), "args": { "command": "cargo test" } }]);
+        let cancelled = json!({ "id": "i1", "type": "info", "timestamp": iso(t0 + 15.0), "content": "Request cancelled." });
+        for v in [user("c0", t0 - 1.0, context), user("u1", t0, "please fix the failing parser test now"), gemini("g1", t0 + 3.0, "", edit(t0 + 5.0)),
+                  gemini("g2", t0 + 8.0, "Fixed it.", json!([])), user("u2", t0 + 10.0, "now run all the tests"), gemini("g3", t0 + 11.0, "", shell), cancelled] {
+            text.push_str(&format!("{v}\n"));
+        }
+        fs::write(&f, &text).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt", "agent_start", "reply_done", "prompt", "agent_start", "reply_done"]);
+        assert!(matches!(&out[0].kind, Kind::Prompt { session, words: 7, .. } if session == "session-2"));
+        assert_eq!(out[5].ts, t0 + 15.0);
+
+        // Resuming names the session again and rewrites old records to match the model's history.
+        let patch = json!({ "$patch": { "updates": [{ "id": "c0", "content": [{ "text": context }] }] } });
+        for v in [json!({ "$set": { "sessionId": "g2" } }), patch, user("u3", t0 + 20.0, "thanks, that is all")] {
+            text.push_str(&format!("{v}\n"));
+        }
+        fs::write(&f, &text).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt"]);
+        assert!(matches!(&out[0].kind, Kind::Prompt { session, words: 4, .. } if session == "session-2"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -370,10 +436,12 @@ mod tests {
             call("c3", "write_file", "success", 1_003.0, json!({ "file_path": "/w/p/over.rs" }), json!({ "originalContent": "a\nb\nc\n", "newContent": "a\nx\nc\nd\n" })),
             call("c4", "replace", "success", 1_004.0, json!({ "file_path": "/w/p/stat.rs" }), json!({ "diffStat": { "model_added_lines": 2, "model_removed_lines": 1, "user_added_lines": 0, "user_removed_lines": 0 } })),
             call("c5", "run_shell_command", "success", 1_005.0, json!({ "command": "git commit -am 'fix it'", "dir_path": "sub" }), json!("[main abc1234] fix it\n 1 file changed")),
+            call("c6", "run_shell_command", "success", 1_006.0, json!({ "command": "git commit -m 'two'" }),
+                 json!([[{ "text": "[main def5678] two    ", "bold": false }], [{ "text": " 1 file changed    " }], [{ "text": " ", "inverse": true }, { "text": "    " }]])),
         ]);
         assert_eq!(
             summary(&out),
-            ["/w/p/a.rs +2 -1", "/w/p/new.rs +3 -0", "/w/p/over.rs +2 -1", "/w/p/stat.rs +2 -1", "commit abc1234 in /w/p/sub"]
+            ["/w/p/a.rs +2 -1", "/w/p/new.rs +3 -0", "/w/p/over.rs +2 -1", "/w/p/stat.rs +2 -1", "commit abc1234 in /w/p/sub", "commit def5678 in /w/p"]
         );
         assert!(matches!(&out[0].kind, Kind::AgentEdit { session, .. } if session == "g1"));
     }

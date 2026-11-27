@@ -284,6 +284,8 @@ pub struct Cursor {
     stamp: HashMap<PathBuf, (f64, u64, f64, u64)>,
     composers: HashMap<String, Composer>,
     folders: HashMap<String, PathBuf>,
+    // The Cursor that last started, per state.vscdb. VS Code writes its version there at each start for release notes.
+    versions: HashMap<PathBuf, String>,
     scanned: f64,
 }
 
@@ -398,6 +400,7 @@ impl Cursor {
             stamp: HashMap::new(),
             composers: HashMap::new(),
             folders: HashMap::new(),
+            versions: HashMap::new(),
             scanned: f64::MIN,
         }
     }
@@ -486,6 +489,9 @@ impl Cursor {
             return;
         }
         let Some(c) = open(db) else { return };
+        if let Ok(v) = c.query_row("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = 'releaseNotes/lastVersion'", [], |r| r.get::<_, String>(0)) {
+            self.versions.insert(db.to_path_buf(), v);
+        }
         let Some(&after) = self.watermark.get(db) else {
             if let Ok(max) = c.query_row("SELECT COALESCE(MAX(rowid), 0) FROM cursorDiskKV", [], |r| r.get::<_, i64>(0)) {
                 self.watermark.insert(db.to_path_buf(), max);
@@ -617,7 +623,9 @@ impl Source for Cursor {
             if let Some(f) = self.folders.get(cid) {
                 comp.cwd = Some(f.clone());
             }
-            let turns = comp.turns(at);
+            let mut turns = comp.turns(at);
+            let version = comp.db.as_ref().and_then(|d| self.versions.get(d));
+            turns.iter_mut().for_each(|t| t.version = version.cloned());
             self.snaps.emit(cid, comp.cwd.as_deref(), &turns, &mut out);
             let last_user = comp.bubbles.values().filter(|b| b.user).map(|b| b.ts).reduce(f64::max);
             self.snaps.emit_work(cid, comp.work(cid, last_user.unwrap_or(f64::MIN)), &mut out);
@@ -681,6 +689,7 @@ mod tests {
             c.execute_batch(
                 "PRAGMA journal_mode=WAL;
                  CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
+                 INSERT INTO ItemTable VALUES ('releaseNotes/lastVersion', '3.31.15');
                  CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
                  CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, workspaceId TEXT, createdAt INTEGER,
                      lastUpdatedAt INTEGER, isArchived INTEGER, isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER,
@@ -758,7 +767,7 @@ mod tests {
         assert_eq!(names(&out), ["prompt"]);
         assert_eq!(out[0].ts, t0);
         assert_eq!(out[0].cwd.as_deref(), Some(Path::new("/w/p")));
-        assert!(matches!(&out[0].kind, Kind::Prompt { words: 7, model: Some(m), session, .. } if m == "composer-2.5" && session == "c1"));
+        assert!(matches!(&out[0].kind, Kind::Prompt { words: 7, model: Some(m), session, version: Some(v), .. } if m == "composer-2.5" && session == "c1" && v == "3.31.15"));
 
         let params = json!({ "relativeWorkspacePath": "/w/p/a.rs", "streamingContent": "fn main() {}" }).to_string();
         f.put(

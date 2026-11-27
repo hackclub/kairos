@@ -198,7 +198,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\Kairos'
           $web = Start-Process -FilePath python -ArgumentList '-m', 'http.server', '8099', '--bind', '127.0.0.1', '--directory', 'site' -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 3
+          for ($i = 0; $i -lt 100; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8099/' | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+          }
           $env:KAIROS_SERVER = 'http://127.0.0.1:8099'
           try {
             Get-Content packaging/install.ps1 -Raw | Invoke-Expression
@@ -220,9 +222,10 @@ jobs:
           set -eu
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          python3 -m http.server 8099 --bind 127.0.0.1 --directory site >/dev/null 2>&1 &
+          python3 -m http.server 8099 --bind 127.0.0.1 --directory site > "$RUNNER_TEMP/web.log" 2>&1 &
           trap "kill $!" EXIT
-          sleep 2
+          for i in $(seq 100); do curl -fs -o /dev/null http://127.0.0.1:8099/ && break; sleep 0.2; done
+          curl -fsS -o /dev/null http://127.0.0.1:8099/ || { python3 --version; cat "$RUNNER_TEMP/web.log"; exit 1; }
           if [ "$RUNNER_OS" = macOS ]; then
             bin="$HOME/Library/Application Support/Kairos/bin"
           else

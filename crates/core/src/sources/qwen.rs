@@ -83,6 +83,15 @@ fn text(parts: &[&Value]) -> String {
         .join("\n")
 }
 
+// A paste goes in between <clipboard-paste> marks, with a note of Qwen Code's own for the model after the last one.
+fn unmarked(prompt: &str) -> String {
+    const MARK: &str = "</clipboard-paste>";
+    let Some(end) = prompt.rfind(MARK) else { return prompt.to_string() };
+    let (head, tail) = prompt.split_at(end + MARK.len());
+    let tail = tail.find("Each block delimited by <clipboard-paste> markers").map_or(tail, |i| &tail[..i]);
+    format!("{head}{tail}").replace("<clipboard-paste>", "").replace(MARK, "")
+}
+
 fn agent_work(t: &mut Turn, e: &Value, ts: f64, ps: &[&Value], out: &mut Vec<Found>) {
     match e.get("type").and_then(Value::as_str) {
         Some("assistant") => {
@@ -116,8 +125,9 @@ fn agent_work(t: &mut Turn, e: &Value, ts: f64, ps: &[&Value], out: &mut Vec<Fou
                     }
                 }
                 Call::Shell(cmd) => {
+                    // 0.28 shows an object with the command's own output; the model's copy puts a label before it.
                     let output = rd
-                        .and_then(Value::as_str)
+                        .and_then(|d| d.as_str().or_else(|| d.get("output").and_then(Value::as_str)))
                         .or_else(|| ps.iter().find_map(|p| p.pointer("/functionResponse/response/output")?.as_str()))
                         .unwrap_or("");
                     work::commits(ts, t.cwd.as_deref(), &t.session, &cmd, output, out);
@@ -151,7 +161,7 @@ fn feed(t: &mut Turn, e: &Value, out: &mut Vec<Found>) {
             {
                 return;
             }
-            let prompt = text(&ps);
+            let prompt = unmarked(&text(&ps));
             let (w, pasted) = prompt_stats(&prompt);
             if w == 0 {
                 return;
@@ -203,7 +213,9 @@ fn feed(t: &mut Turn, e: &Value, out: &mut Vec<Found>) {
             t.last_ts = ts;
             let r = e.get("toolCallResult");
             let ok = r.and_then(|r| r.get("status")).and_then(Value::as_str).is_none_or(|s| s == "success");
-            if let Some(f) = r.and_then(|r| r.pointer("/resultDisplay/fileName")).and_then(Value::as_str).filter(|_| ok) {
+            // fileName is the name alone, without its folders.
+            let f = r.and_then(|r| r.pointer("/resultDisplay/filePath").or_else(|| r.pointer("/resultDisplay/fileName")));
+            if let Some(f) = f.and_then(Value::as_str).filter(|_| ok) {
                 if r.and_then(|r| r.pointer("/resultDisplay/diffStat")).is_some() {
                     t.file(f);
                 }
@@ -389,5 +401,43 @@ mod tests {
             &done("zz", "success", diff),
         ]);
         assert!(summary(&out).is_empty());
+    }
+
+    // As Qwen Code 0.28.7 writes them (lab run, 2026-11-27), cut down.
+    #[test]
+    fn qwen_0_28_shell_results_file_names_and_pastes() {
+        let write = r#"{"fileDiff":"@@ -0,0 +1,1 @@\n+NAMES = []\n","fileName":"util.py","filePath":"/w/p/pkg/util.py","originalContent":"","newContent":"NAMES = []\n","diffStat":{"model_added_lines":1,"model_removed_lines":0}}"#;
+        let edit = r#"{"fileDiff":"@@ -4 +4,2 @@\n-a\n+b\n+c\n","fileName":"hello.py","filePath":"/w/p/hello.py","diffStat":{"model_added_lines":2,"model_removed_lines":1}}"#;
+        let shell = r#"{"type":"shell_result","version":1,"directory":"/w/p","exitCode":0,"outcome":"completed","output":"[main 4958dbe] add util\n 2 files changed, 3 insertions(+), 1 deletion(-)"}"#;
+        let commit = done("s1", "success", shell).replace(
+            r#""response":{"output":"ignored"}"#,
+            r#""response":{"output":"Command: git commit -m \"add util\"\nDirectory: (root)\nOutput (stdout and stderr combined): [main 4958dbe] add util\n 2 files changed"}"#,
+        );
+        let out = run(&[
+            USER,
+            &call("e1", "write_file", r#"{"file_path":"/w/p/pkg/util.py","content":"NAMES = []\n"}"#),
+            &done("e1", "success", write),
+            &call("e2", "edit", r#"{"file_path":"/w/p/hello.py","old_string":"a","new_string":"b\nc"}"#),
+            &done("e2", "success", edit),
+            &call("s1", "run_shell_command", r#"{"command":"git commit -m \"add util\""}"#),
+            &commit,
+            DONE,
+        ]);
+        assert_eq!(summary(&out), ["q1 /w/p/pkg/util.py +1 -0", "q1 /w/p/hello.py +2 -1", "commit 4958dbe in /w/p"]);
+        match &out.iter().find(|f| f.kind.name() == "reply_done").unwrap().kind {
+            Kind::ReplyDone { files_changed, .. } => assert_eq!(*files_changed, 2),
+            k => panic!("{k:?}"),
+        }
+
+        let typed = "keep this in a notes file please";
+        let pasted = "$ python hello.py\nhello kairos\nhello lab";
+        let note = "Each block delimited by <clipboard-paste> markers in this message was pasted from the system clipboard, and it was too large to display in the editor, so the user may not have read it. Text outside those markers is the user's own typed input.";
+        let prompt = format!("{typed}\n<clipboard-paste>\n{pasted}\n</clipboard-paste>\n{note}");
+        let user = USER.replace("please fix the failing parser test now", &prompt.replace('\n', "\\n"));
+        match &run(&[&user])[0].kind {
+            Kind::Prompt { words, .. } => assert_eq!(*words, 7 + 7),
+            k => panic!("{k:?}"),
+        }
+        assert_eq!(unmarked(&format!("{typed}\n<clipboard-paste>\n{pasted}\n</clipboard-paste>\nand more\n{note}")).split_whitespace().count(), 16);
     }
 }

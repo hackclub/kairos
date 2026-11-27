@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use chrono::{Days, NaiveDate};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use deadpool_postgres::GenericClient;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -178,24 +178,24 @@ async fn load(c: &impl GenericClient, user_id: i64, tz: chrono_tz::Tz, from: Nai
     let hi = day_start(tz, to.succ_opt().unwrap_or(to)) + 86400.0;
     let rows = c
         .query(
-            "SELECT (hour AT TIME ZONE $2)::date AS day, harness, model,
-                    sum(input)::int8, sum(output)::int8, sum(cache_read)::int8, sum(cache_write)::int8
+            "SELECT hour, harness, model, sum(input)::int8, sum(output)::int8, sum(cache_read)::int8, sum(cache_write)::int8
              FROM token_hours
-             WHERE user_id = $1 AND hour >= to_timestamp($3) AND hour < to_timestamp($4)
-               AND (hour AT TIME ZONE $2)::date BETWEEN $5 AND $6 AND ($7::text[] IS NULL OR project = ANY($7))
+             WHERE user_id = $1 AND hour >= to_timestamp($2) AND hour < to_timestamp($3) AND ($4::text[] IS NULL OR project = ANY($4))
              GROUP BY 1, 2, 3",
-            &[&user_id, &tz.name(), &lo, &hi, &from, &to, &projects],
+            &[&user_id, &lo, &hi, &projects],
         )
         .await?;
-    Ok(rows
-        .iter()
-        .map(|r| DayRow {
-            day: r.get(0),
-            harness: r.get(1),
-            model: r.get(2),
-            n: Counts { input: r.get(3), output: r.get(4), cache_read: r.get(5), cache_write: r.get(6) },
-        })
-        .collect())
+    // The local day is worked out here: Postgres doesn't know every zone name chrono-tz does (Asia/Calcutta).
+    let mut days: BTreeMap<(NaiveDate, String, String), Counts> = BTreeMap::new();
+    for r in &rows {
+        let day = r.get::<_, DateTime<Utc>>(0).with_timezone(&tz).date_naive();
+        if day < from || day > to {
+            continue;
+        }
+        let n = Counts { input: r.get(3), output: r.get(4), cache_read: r.get(5), cache_write: r.get(6) };
+        days.entry((day, r.get(1), r.get(2))).or_default().add(&n);
+    }
+    Ok(days.into_iter().map(|((day, harness, model), n)| DayRow { day, harness, model, n }).collect())
 }
 
 pub struct Stat {

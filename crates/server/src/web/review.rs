@@ -26,7 +26,7 @@ use crate::api::read::{carve, counts, parse_time};
 use crate::api::stats::{by, load_agent_runs, load_pieces, AgentRun, Piece, Span};
 use crate::audit;
 use crate::auth::{Session, SignedIn, User, USER_COLUMNS};
-use crate::credit::{day_start, local_day, PRIORITY};
+use crate::credit::{day_start, local_day, todays, PRIORITY};
 use crate::github;
 use crate::signals::{self, git_date_off, Signal};
 use crate::util::{clean, err, human, now, refused_or_internal, short, urlenc, Res};
@@ -1289,6 +1289,7 @@ struct Home {
 pub async fn home(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(sq): Query<SearchQ>) -> Res<Response> {
     staff(&s)?;
     let q = clean(sq.q.as_deref().unwrap_or(""), 64);
+    let (zones, days, utc) = todays(now());
     let (users, rows) = {
         let mut c = st.pool.get().await?;
         let tx = c.transaction().await?;
@@ -1300,13 +1301,11 @@ pub async fn home(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Query(s
                         sum(d.seconds) FILTER (WHERE d.class <> 'agent') AS focus,
                         COALESCE(sum(d.seconds) FILTER (WHERE d.class = 'agent'), 0)
                  FROM user_days d JOIN users u ON u.id = d.user_id
-                 -- A zone name Postgres doesn't know would fail the whole query, so it falls back to UTC.
-                 LEFT JOIN pg_timezone_names z ON z.name = u.timezone
-                 WHERE d.day > (now() AT TIME ZONE coalesce(z.name, 'UTC'))::date - $1::int
-                   AND d.day <= (now() AT TIME ZONE coalesce(z.name, 'UTC'))::date
+                 LEFT JOIN unnest($3::text[], $4::date[]) AS z(name, today) ON z.name = u.timezone
+                 WHERE d.day > coalesce(z.today, $5) - $1::int AND d.day <= coalesce(z.today, $5)
                  GROUP BY u.id HAVING sum(d.seconds) FILTER (WHERE d.class <> 'agent') > 0
                  ORDER BY focus DESC, u.id LIMIT $2",
-                &[&(HOME_DAYS as i32), &HOME_TOP],
+                &[&(HOME_DAYS as i32), &HOME_TOP, &zones, &days, &utc],
             )
             .await?;
         tx.commit().await?;

@@ -37,6 +37,10 @@ pub trait Source: Send {
     fn harness(&self) -> &'static str {
         self.name()
     }
+    /// For a source whose files more than one harness writes.
+    fn harness_of(&self, _found: &Found) -> &'static str {
+        self.harness()
+    }
     fn poll(&mut self) -> Vec<Found>;
     fn state(&self) -> Value;
     fn restore(&mut self, state: &Value);
