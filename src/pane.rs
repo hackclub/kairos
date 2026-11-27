@@ -82,7 +82,11 @@ impl Panes {
 
     /// The next window's lab process, once it is up.
     pub fn next(&self) -> Result<Pane> {
-        let until = Instant::now() + Duration::from_secs(60);
+        self.next_within(Duration::from_secs(60))
+    }
+
+    pub fn next_within(&self, wait: Duration) -> Result<Pane> {
+        let until = Instant::now() + wait;
         let mut stream = loop {
             match self.listener.accept() {
                 Ok((s, _)) => break s,

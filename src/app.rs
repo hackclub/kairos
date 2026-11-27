@@ -473,14 +473,34 @@ impl Editor {
         Ok(editor)
     }
 
-    /// A new terminal, from the command palette.
-    pub fn terminal(&mut self) -> Result<()> {
+    /// A new terminal, from the command palette, and the lab process VS Code starts in it.
+    pub fn terminal(&mut self, panes: &crate::pane::Panes) -> Result<crate::pane::Pane> {
+        const COMMAND: &str = "Terminal: Create New Terminal";
         let page = self.page.as_mut().context("VS Code never got past its welcome")?;
-        page.key("F1")?;
-        sleep(Duration::from_millis(800));
-        page.type_text("Terminal: Create New Terminal")?;
-        sleep(Duration::from_millis(800));
-        page.key("Enter")
+        // What the palette holds while it is open and has the keys.
+        let palette = "(() => { const i = document.querySelector('.quick-input-widget .quick-input-box input'); \
+                       return i && i.offsetParent !== null && document.activeElement === i ? i.value : null; })()";
+        for _ in 0..3 {
+            // The last terminal may still be closing, and the palette closes when the focus moves.
+            sleep(Duration::from_secs(2));
+            page.key("F1")?;
+            let until = Instant::now() + Duration::from_secs(5);
+            while page.eval(palette)?.is_null() && Instant::now() < until {
+                sleep(Duration::from_millis(200));
+            }
+            page.type_text(COMMAND)?;
+            sleep(Duration::from_millis(800));
+            let held = page.eval(palette)?;
+            if held.as_str().is_some_and(|v| v.trim_start_matches('>').trim() == COMMAND) {
+                page.key("Enter")?;
+                if let Ok(pane) = panes.next_within(Duration::from_secs(20)) {
+                    return Ok(pane);
+                }
+            }
+            page.key("Escape")?;
+            eprintln!("lab: no terminal came up in VS Code (the palette held {held}), trying again");
+        }
+        bail!("VS Code never started a terminal. It shows:\n{}", page.text()?)
     }
 
     pub fn text(&mut self) -> String {

@@ -752,8 +752,7 @@ fn run() -> Result<bool> {
     let mut open = |args: &[String], raw: &str| -> Result<Term> {
         if let Some(editor) = editor.as_mut() {
             // A new terminal in the editor, and the agent typed into it.
-            editor.terminal()?;
-            let mut pane = panes.next().map_err(|e| anyhow::anyhow!("{e}. VS Code shows:\n{}", editor.text()))?;
+            let mut pane = editor.terminal(&panes)?;
             return pane.start(&command(&bin, args, project, home, &launch.env), &run.join(raw));
         }
         let Some(m) = mux else {
