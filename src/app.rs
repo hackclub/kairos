@@ -579,6 +579,11 @@ fn codex_start(page: &mut Page, run: &Path, project: &str) -> Result<()> {
     sleep(Duration::from_secs(30));
     let mut log = String::new();
     for step in 0..10 {
+        // Run as its package, it first makes its Windows sandbox, which takes minutes.
+        let until = Instant::now() + Duration::from_secs(300);
+        while page.ax()?.iter().any(|(_, n, _)| n == "Finishing Windows setup") && Instant::now() < until {
+            sleep(Duration::from_secs(5));
+        }
         if let Ok(shot) = page.call("Page.captureScreenshot", json!({ "format": "png" })) {
             fs::write(run.join(format!("shot{step}.b64")), shot["data"].as_str().unwrap_or_default())?;
         }
