@@ -150,7 +150,8 @@ pub const ALL: &[Harness] = &[
         bin: "copilot",
         stores: &[".copilot/session-state"],
         state: &[".copilot"],
-        first_run: &[(&["Confirm folder trust", "❯ 1. Yes"], &[ENTER])],
+        // In VS Code's terminal it offers to add a Shift+Enter key binding to VS Code's settings, "No" picked already.
+        first_run: &[(&["Confirm folder trust", "❯ 1. Yes"], &[ENTER]), (&["Set up terminal for multi-line input", "❯ 2. No"], &[ENTER])],
         ready: &["/ commands · ? help"],
         during: &[],
         marks_since: None,
