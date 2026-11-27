@@ -1,2 +1,1 @@
 claude-code latest two
-codex latest two
