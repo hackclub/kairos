@@ -251,7 +251,14 @@ impl App {
                 if !exe.is_file() {
                     bail!("installed the Codex app but there is no {}", exe.display());
                 }
-                return Ok((exe, version));
+                // Started from its install folder it would run without its package, which the Start menu and the alias
+                // give it. The alias also keeps the lab's environment.
+                let alias = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("no LOCALAPPDATA")?)
+                    .join("Microsoft")
+                    .join("WindowsApps")
+                    .join("chatgpt-desktop.exe");
+                fs::symlink_metadata(&alias).with_context(|| format!("installed the Codex app but there is no {}", alias.display()))?;
+                return Ok((alias, version));
             }
             // A zip, or one by another name. Windows' own tar reads zips, Git's doesn't.
             _ if cfg!(windows) && (name.ends_with(".nupkg") || name.ends_with(".zip")) => {
@@ -1186,6 +1193,10 @@ pub fn run(app: &App, args: &Args) -> Result<bool> {
     let folder = exe.parent().context("the app has no folder")?;
     if cfg!(windows) {
         let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &child.id().to_string()]).output();
+        if app.id == "codex-app" {
+            // Started by its alias, so the app may not be the lab's own child.
+            let _ = Command::new("taskkill").args(["/T", "/F", "/IM", "ChatGPT.exe"]).output();
+        }
     } else {
         let _ = Command::new("pkill").arg("-f").arg(folder).status();
         // The agent's server the app started from the harness's own folder, or agy from the run's home.
