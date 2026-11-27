@@ -217,7 +217,7 @@ pub fn run(h: &'static Harness, args: &Args) -> Result<bool> {
     fs::create_dir_all(&away)?;
     let (a, b) = scenario::two();
     let (a, b) = (Arc::new(a), Arc::new(b));
-    let model = Model::start(a.clone(), p.project.clone())?;
+    let model = Model::start(a.clone(), p.project.clone())?.reads_first(h.reads_first);
     let model_b = model.add(b.clone(), second.clone())?;
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario two, run folder {}", h.id, p.run.display());

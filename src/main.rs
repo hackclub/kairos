@@ -717,7 +717,7 @@ fn run() -> Result<bool> {
         scenario.name = m;
     }
     let scenario = Arc::new(scenario);
-    let model = Model::start(scenario.clone(), project.clone())?;
+    let model = Model::start(scenario.clone(), project.clone())?.reads_first(h.reads_first);
     let url = format!("http://127.0.0.1:{}", model.port);
     eprintln!("lab: {} {version}, scenario {}, run folder {}", h.id, scenario.name, run.display());
 

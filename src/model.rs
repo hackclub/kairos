@@ -27,6 +27,7 @@ struct State {
     lanes: Vec<Lane>,
     requests: Vec<Value>,
     problems: Vec<String>,
+    reads_first: bool,
 }
 
 /// One session's scenario on the model server.
@@ -49,7 +50,7 @@ impl Model {
     pub fn start(scenario: Arc<Scenario>, project: PathBuf) -> Result<Model> {
         let server = Server::http("127.0.0.1:0").map_err(|e| anyhow!("{e}"))?;
         let port = server.server_addr().to_ip().ok_or_else(|| anyhow!("the model server has no port"))?.port();
-        let state = Arc::new(Mutex::new(State { lanes: Vec::new(), requests: Vec::new(), problems: Vec::new() }));
+        let state = Arc::new(Mutex::new(State { lanes: Vec::new(), requests: Vec::new(), problems: Vec::new(), reads_first: false }));
         let shared = state.clone();
         thread::spawn(move || {
             for req in server.incoming_requests() {
@@ -66,6 +67,12 @@ impl Model {
         let mut s = self.state.lock().unwrap();
         s.lanes.push(Lane { scenario, project, turn: None, said, stalled });
         Ok(Model { port: self.port, state: self.state.clone(), lane: s.lanes.len() - 1 })
+    }
+
+    /// Reads each file before editing it, for a harness that won't edit one it hasn't read.
+    pub fn reads_first(self, on: bool) -> Model {
+        self.state.lock().unwrap().reads_first = on;
+        self
     }
 
     pub fn arm(&self, turn: usize) {
@@ -425,7 +432,7 @@ fn chat(state: &Mutex<State>, lane: Option<usize>, body: &Value) -> (&'static st
         Plan::Side => ("side".to_string(), text("ok")),
         Plan::Stall => ("stall".to_string(), text("ok")),
         Plan::Say(t) => ("say".to_string(), text(&t)),
-        Plan::Act(id, act) => match read_first(&tools, &id, act, &project, &answered) {
+        Plan::Act(id, act) => match read_first(&tools, &id, act, &project, &answered).filter(|_| state.lock().unwrap().reads_first) {
             Some(call) => (format!("{id}_read"), (json!({ "role": "assistant", "content": null, "tool_calls": [call] }), "tool_calls")),
             None => match chat_call(&tools, act, &project) {
                 Some((name, args)) => {
