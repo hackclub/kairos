@@ -539,6 +539,10 @@ fn claude_start(person: &Person, exe: &Path, link: &str, home: &Path, run: &Path
         let log = OpenOptions::new().create(true).append(true).open(run.join("app.log"))?;
         let mut again = Command::new(exe);
         again.arg(link).env("HOME", home).env("USERPROFILE", home).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+        // With the runner's XDG_CONFIG_HOME it would look for the first copy in another settings folder and start anew.
+        for k in crate::STRAY_ENV {
+            again.env_remove(k);
+        }
         if OS == "linux" {
             again.args(["--no-sandbox", "--disable-gpu"]);
         }
