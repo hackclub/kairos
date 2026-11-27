@@ -20,7 +20,7 @@ env:
   ONLY: ' two$|^claude-code latest tmux'
   SYSTEMS: 'macos'
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
-  VERSIONS: versions.txt
+  VERSIONS: ci/order.txt
   GITHUB_TOKEN: ${{ github.token }}
 jobs:
   run:
