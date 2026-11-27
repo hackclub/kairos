@@ -117,11 +117,15 @@ pub fn serve(port: &str, away: &str) -> Result<bool> {
     let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("{e}"))?;
     let mut writer = pair.master.take_writer().map_err(|e| anyhow!("{e}"))?;
     let mut out = stream.try_clone()?;
+    // Reads to the end even after the main window is gone: on macOS a program can't finish exiting while its terminal
+    // holds output nobody read (Claude Code prints a lot when it quits).
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut sending = true;
         while let Ok(n @ 1..) = reader.read(&mut buf) {
-            if out.write_all(&buf[..n]).is_err() {
-                break;
+            if sending && out.write_all(&buf[..n]).is_err() {
+                sending = false;
+                let _ = out.shutdown(Shutdown::Both);
             }
         }
         let _ = out.shutdown(Shutdown::Both);

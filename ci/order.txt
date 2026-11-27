@@ -1,1 +1,3 @@
 claude-code latest two
+claude-code latest
+claude-code latest tmux
