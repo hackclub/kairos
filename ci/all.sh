@@ -16,7 +16,7 @@ fi
 export npm_config_cache="$work/tools/.npm"
 : > result.txt
 # On macOS, which windows are on screen between runs (lab.yml sets WINDOWS).
-windows() { [ -n "${WINDOWS:-}" ] && { echo "== $1"; "$WINDOWS"; } >> windows.txt; }
+windows() { [ -n "${WINDOWS:-}" ] && { echo "== $1"; ci/windows.sh "$WINDOWS"; } >> windows.txt 2>&1; }
 # versions.txt comes in on fd 3: stdin stays the terminal, which the two-window runs read.
 while read -r harness version scenario <&3; do
   [ -z "$harness" ] && continue
