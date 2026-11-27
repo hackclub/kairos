@@ -560,6 +560,7 @@ const KNOWN: &[Known] = &[
     Known { bug: 53, harness: "qwen-code", fixed: "", text: "prompt.words is" },
     Known { bug: 54, harness: "qwen-code", fixed: "", text: "window in front" },
     Known { bug: 54, harness: "qwen-code", fixed: "", text: "credit came while nobody had touched anything" },
+    Known { bug: 54, harness: "qwen-code", fixed: "", text: "of credit was testing in project" },
     Known { bug: 55, harness: "gemini-cli", fixed: "", text: "Kairos saw" },
     Known { bug: 55, harness: "gemini-cli", fixed: "", text: "turn " },
 ];
