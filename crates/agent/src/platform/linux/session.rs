@@ -81,8 +81,15 @@ impl SessionEnv {
             .or_else(|| self.runtime_dir().map(|d| format!("unix:path={}", d.join("bus").display())))
     }
 
-    pub fn hyprland_signature(&self) -> Option<&str> {
-        self.get(HYPRLAND_INSTANCE_SIGNATURE)
+    /// The running Hyprland's socket folder: `$XDG_RUNTIME_DIR/hypr/<sig>`, or `/tmp/hypr/<sig>` before Hyprland 0.40.
+    pub fn hyprland_dir(&self) -> Option<PathBuf> {
+        let sig = self.get(HYPRLAND_INSTANCE_SIGNATURE)?;
+        let mut candidates = Vec::new();
+        if let Some(rt) = self.runtime_dir() {
+            candidates.push(rt.join("hypr").join(sig));
+        }
+        candidates.push(PathBuf::from("/tmp/hypr").join(sig));
+        candidates.into_iter().find(|d| d.join(".socket2.sock").exists())
     }
 
     pub fn sway_socket(&self) -> Option<PathBuf> {
@@ -120,6 +127,16 @@ impl SessionEnv {
             let dir = PathBuf::from(format!("/run/user/{uid}"));
             if dir.is_dir() {
                 self.set(XDG_RUNTIME_DIR, dir.to_string_lossy().into_owned());
+            }
+        }
+        // kairosd keeps the environment it started with, so after the compositor restarts (or a new login) these still
+        // name the old instance while WAYLAND_DISPLAY is reused. One whose socket is gone counts as unset.
+        if self.get(HYPRLAND_INSTANCE_SIGNATURE).is_some() && self.hyprland_dir().is_none() {
+            self.vars.remove(HYPRLAND_INSTANCE_SIGNATURE);
+        }
+        for key in [SWAYSOCK, NIRI_SOCKET] {
+            if self.get(key).is_some_and(|p| !Path::new(p).exists()) {
+                self.vars.remove(key);
             }
         }
         let Some(rt) = self.runtime_dir() else { return };
@@ -333,5 +350,65 @@ mod tests {
         fs::write(&new, "").unwrap();
         assert_eq!(newest(sockets_named(&dir, "sway-ipc.")), Some(new));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kairos-session-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_hyprland_signature_from_before_a_restart_gives_way_to_the_running_one() {
+        let rt = runtime_dir("hypr-restart");
+        fs::create_dir_all(rt.join("hypr/new")).unwrap();
+        fs::write(rt.join("hypr/new/.socket2.sock"), "").unwrap();
+        let rts = rt.to_string_lossy().into_owned();
+        let mut e = SessionEnv::from_pairs(&[(XDG_RUNTIME_DIR, &rts), (XDG_CURRENT_DESKTOP, "Hyprland"), (HYPRLAND_INSTANCE_SIGNATURE, "old")]);
+        e.fill_defaults(0);
+        assert_eq!(e.hyprland_dir(), Some(rt.join("hypr/new")));
+        let _ = fs::remove_dir_all(&rt);
+    }
+
+    #[test]
+    fn a_hyprland_signature_that_still_runs_is_kept() {
+        let rt = runtime_dir("hypr-alive");
+        for sig in ["mine", "later"] {
+            fs::create_dir_all(rt.join("hypr").join(sig)).unwrap();
+            fs::write(rt.join("hypr").join(sig).join(".socket2.sock"), "").unwrap();
+        }
+        let rts = rt.to_string_lossy().into_owned();
+        let mut e = SessionEnv::from_pairs(&[(XDG_RUNTIME_DIR, &rts), (XDG_CURRENT_DESKTOP, "Hyprland"), (HYPRLAND_INSTANCE_SIGNATURE, "mine")]);
+        e.fill_defaults(0);
+        assert_eq!(e.hyprland_dir(), Some(rt.join("hypr/mine")));
+        let _ = fs::remove_dir_all(&rt);
+    }
+
+    #[test]
+    fn a_hyprland_signature_with_nothing_running_is_dropped() {
+        let rt = runtime_dir("hypr-gone");
+        let rts = rt.to_string_lossy().into_owned();
+        let mut e = SessionEnv::from_pairs(&[(XDG_RUNTIME_DIR, &rts), (XDG_CURRENT_DESKTOP, "Hyprland"), (HYPRLAND_INSTANCE_SIGNATURE, "old")]);
+        e.fill_defaults(0);
+        assert_eq!(e.get(HYPRLAND_INSTANCE_SIGNATURE), None);
+        let _ = fs::remove_dir_all(&rt);
+    }
+
+    #[test]
+    fn a_sway_or_niri_socket_from_before_a_restart_gives_way_to_the_running_one() {
+        let rt = runtime_dir("sway-restart");
+        fs::write(rt.join("sway-ipc.1000.20.sock"), "").unwrap();
+        fs::write(rt.join("niri.wayland-1.30.sock"), "").unwrap();
+        let rts = rt.to_string_lossy().into_owned();
+        let old_sway = rt.join("sway-ipc.1000.10.sock").to_string_lossy().into_owned();
+        let old_niri = rt.join("niri.wayland-1.10.sock").to_string_lossy().into_owned();
+        let mut sway = SessionEnv::from_pairs(&[(XDG_RUNTIME_DIR, &rts), (XDG_CURRENT_DESKTOP, "sway"), (SWAYSOCK, &old_sway)]);
+        sway.fill_defaults(0);
+        assert_eq!(sway.sway_socket(), Some(rt.join("sway-ipc.1000.20.sock")));
+        let mut niri = SessionEnv::from_pairs(&[(XDG_RUNTIME_DIR, &rts), (XDG_CURRENT_DESKTOP, "niri"), (NIRI_SOCKET, &old_niri)]);
+        niri.fill_defaults(0);
+        assert_eq!(niri.niri_socket(), Some(rt.join("niri.wayland-1.30.sock")));
+        let _ = fs::remove_dir_all(&rt);
     }
 }

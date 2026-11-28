@@ -202,6 +202,28 @@ fn supervisor_picks_up_a_session_that_starts_late() {
     panic!("the session was never found");
 }
 
+#[test]
+#[ignore = "needs a Sway session that restarts during the test, see tests/linux-desktops"]
+fn supervisor_finds_the_compositor_again_after_it_restarts() {
+    let (ftx, _frx) = mpsc::channel();
+    let (etx, erx) = mpsc::channel();
+    let found = super::supervisor::spawn(Sinks { foreground: ftx, events: etx });
+    assert_eq!(found, Backends { focus: "sway", idle: "ext-idle-notify" });
+    let mut lost = false;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(Msg::Backends(b)) = erx.recv_timeout(left) {
+            if b.focus == "none" {
+                lost = true;
+            } else if lost {
+                assert_eq!(b.focus, "sway");
+                return;
+            }
+        }
+    }
+    panic!("focus never came back after Sway restarted (lost it: {lost})");
+}
+
 struct FakeKwin {
     loaded: Arc<Mutex<Option<String>>>,
 }
