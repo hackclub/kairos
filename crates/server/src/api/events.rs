@@ -1,3 +1,5 @@
+//! Uploads from paired devices. What lands here becomes the credited hours Hack Club programs read.
+
 use std::collections::HashMap;
 
 use axum::extract::State;

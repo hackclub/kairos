@@ -1,3 +1,5 @@
+//! Sends the sealed log as kairosd recorded it. Nothing on the way should add to it or change it.
+
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;

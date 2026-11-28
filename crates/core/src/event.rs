@@ -1,3 +1,6 @@
+//! A device's record of focus time. Hack Club programs read it when they give out prizes, so events come only from what
+//! the recorder saw.
+
 use std::fs;
 use std::path::Path;
 

@@ -1,3 +1,6 @@
+//! Simulated people for load and credit tests, against a server you started yourself. Never point it at
+//! kairos.hackclub.com or a real account.
+
 mod check;
 mod client;
 mod expected;
