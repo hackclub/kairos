@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{Extensions, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use deadpool_postgres::GenericClient;
@@ -16,6 +16,7 @@ use crate::api::device;
 use crate::credit;
 use crate::limits::{self, Bucket};
 use crate::live;
+use crate::networks;
 use crate::util::{err, hash, now, Res};
 use crate::St;
 
@@ -92,7 +93,7 @@ pub fn repo_url(project: &str) -> Option<String> {
 /// the server work through that much history again, so a device gets to do it only a few times (`Bucket::Rewind`).
 const REWIND_SECS: f64 = 16.0 * 86_400.0;
 
-pub async fn upload(State(st): State<St>, h: HeaderMap, Json(up): Json<Upload>) -> Res<Response> {
+pub async fn upload(State(st): State<St>, ext: Extensions, h: HeaderMap, Json(up): Json<Upload>) -> Res<Response> {
     let dev = device::auth(&st, &h).await?;
     limits::check(&st, Bucket::Events, &dev.token_hash)?;
     if up.events.len() > MAX_BATCH {
@@ -163,6 +164,14 @@ pub async fn upload(State(st): State<St>, h: HeaderMap, Json(up): Json<Upload>) 
         &[&dev.id, &new_head, &n, &first_prev, &version, &backends, &lo, &hi],
     )
     .await?;
+    let ip = limits::client_ip(&ext, &h, &st.config.trusted_proxies);
+    let seen = networks::Seen {
+        place: st.networks.find(ip),
+        ip_hash: st.ip_key.as_ref().map(|k| networks::ip_hash(k, ip)),
+        fingerprint: networks::fingerprint(&h),
+        clock_skew: networks::clock_skew(&h),
+    };
+    networks::record(&tx, dev.id, &seen).await?;
 
     let mut seen: HashMap<&str, (f64, f64)> = HashMap::new();
     for r in &rows {

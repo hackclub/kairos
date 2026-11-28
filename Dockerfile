@@ -11,11 +11,17 @@ ARG RELEASE_TAG=v0.1.27
 RUN GH_REPO=$RELEASE_REPO KAIROS_RELEASE=target/release/kairos-release KAIROS_DOWNLOADS=/downloads \
     sh deploy/publish-release.sh $RELEASE_TAG
 
+# Provider and country for upload addresses, looked up on the server (iptoasn.com, public domain). Fetched fresh on
+# every build; if the download fails the server still runs and uploads get no provider.
+RUN mkdir -p /ipdata && (curl -fsSL --retry 3 https://iptoasn.com/data/ip2asn-combined.tsv.gz | gunzip > /ipdata/ip2asn-combined.tsv \
+    || { echo "ip2asn download failed"; rm -f /ipdata/ip2asn-combined.tsv; })
+
 FROM debian:bookworm-slim
 RUN useradd -r -u 10001 kairos
 COPY --from=build /src/target/release/kairos-server /usr/local/bin/kairos-server
 COPY --from=build /downloads /downloads
+COPY --from=build /ipdata /ipdata
 USER kairos
-ENV BIND=0.0.0.0:8787 KAIROS_DOWNLOADS=/downloads
+ENV BIND=0.0.0.0:8787 KAIROS_DOWNLOADS=/downloads KAIROS_IP2ASN=/ipdata/ip2asn-combined.tsv
 EXPOSE 8787
 CMD ["kairos-server"]

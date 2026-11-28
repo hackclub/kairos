@@ -27,6 +27,10 @@ pub struct Config {
     pub github_token: Option<String>,
     pub github_api: String,
     pub self_delete: bool,
+    /// iptoasn.com's combined table, unpacked. Without it uploads get no provider or country.
+    pub ip2asn: Option<std::path::PathBuf>,
+    /// Keys the upload address hash. Never logged or rendered.
+    pub ip_key: Option<String>,
 }
 
 impl Config {
@@ -114,6 +118,11 @@ impl Config {
             Some("1") => true,
             Some(other) => bail!("KAIROS_SELF_DELETE must be 0 or 1, not {other:?}"),
         };
+        let ip2asn = var("KAIROS_IP2ASN").map(std::path::PathBuf::from);
+        let ip_key = var("KAIROS_IP_KEY");
+        if ip_key.as_ref().is_some_and(|k| k.len() < 32) {
+            bail!("KAIROS_IP_KEY must be at least 32 characters");
+        }
         Ok(Config {
             database_url,
             public_url,
@@ -130,6 +139,8 @@ impl Config {
             github_token,
             github_api,
             self_delete,
+            ip2asn,
+            ip_key,
         })
     }
 

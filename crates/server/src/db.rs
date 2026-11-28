@@ -18,6 +18,7 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (11, "commit_not_before", include_str!("../migrations/0011_commit_not_before.sql")),
     (12, "tokens", include_str!("../migrations/0012_tokens.sql")),
     (13, "hide_projects", include_str!("../migrations/0013_hide_projects.sql")),
+    (14, "device_networks", include_str!("../migrations/0014_device_networks.sql")),
 ];
 const MIGRATION_LOCK: i64 = 0x6b61_6972_6f73;
 

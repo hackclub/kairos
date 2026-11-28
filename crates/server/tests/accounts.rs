@@ -104,7 +104,7 @@ async fn export_has_everything_and_no_secrets() {
     assert_eq!(v["format"], "kairos-export");
     assert_eq!(v["profile"]["username"], "ada");
     assert_eq!(v["profile"]["email"], "ada@example.com");
-    for (section, min) in [("devices", 1), ("projects", 1), ("commits", 1), ("days", 1), ("spans", 1), ("agent_runtime", 1), ("heartbeats", 1), ("events", 14)] {
+    for (section, min) in [("devices", 1), ("device_networks", 1), ("projects", 1), ("commits", 1), ("days", 1), ("spans", 1), ("agent_runtime", 1), ("heartbeats", 1), ("events", 14)] {
         let n = v[section].as_array().unwrap_or_else(|| panic!("{section} missing")).len();
         assert!(n >= min, "{section}: {n}");
     }

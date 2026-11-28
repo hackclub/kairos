@@ -53,6 +53,12 @@ const SECTIONS: &[(&str, &str)] = &[
             'revoked_at', revoked_at) FROM devices WHERE user_id = $1 ORDER BY id",
     ),
     (
+        "device_networks",
+        "SELECT json_build_object('device_id', n.device_id, 'since', n.since, 'last_seen', n.last_seen, 'asn', n.asn, 'provider', n.provider,
+            'country', n.country, 'ip_hash', n.ip_hash, 'fingerprint', n.fingerprint, 'clock_skew', n.clock_skew)
+         FROM device_networks n JOIN devices d ON d.id = n.device_id WHERE d.user_id = $1 ORDER BY n.device_id, n.since",
+    ),
+    (
         "projects",
         "SELECT json_build_object('id', id, 'repo_url', repo_url, 'hidden', hidden, 'first_seen', first_seen, 'last_seen', last_seen)
          FROM projects WHERE user_id = $1 ORDER BY id",

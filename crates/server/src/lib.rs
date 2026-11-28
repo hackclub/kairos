@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod leaderboard;
 pub mod limits;
 pub mod live;
+pub mod networks;
 pub mod prices;
 pub mod programs;
 pub mod security;
@@ -47,6 +48,8 @@ pub struct App {
     pub limits: limits::Limiter,
     pub live: live::Hub,
     pub boards: web::leaderboards::Cache,
+    pub networks: networks::Table,
+    pub ip_key: Option<[u8; 32]>,
 }
 
 pub type St = Arc<App>;
@@ -62,7 +65,29 @@ impl App {
             AuthMode::Mock => Some(auth::mock::Provider::new()?),
             AuthMode::Hca => None,
         };
-        Ok(Arc::new(App { config, pool, http, oidc: auth::oidc::Cache::default(), mock, limits: limits::Limiter::default(), live: live::Hub::default(), boards: web::leaderboards::Cache::default() }))
+        let networks = match &config.ip2asn {
+            None => networks::Table::default(),
+            Some(path) => networks::Table::load(path).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "no provider table, uploads get no provider or country");
+                networks::Table::default()
+            }),
+        };
+        if config.ip2asn.is_some() {
+            tracing::info!(ranges = networks.len(), "provider table loaded");
+        }
+        let ip_key = config.ip_key.as_deref().map(networks::ip_key);
+        Ok(Arc::new(App {
+            config,
+            pool,
+            http,
+            oidc: auth::oidc::Cache::default(),
+            mock,
+            limits: limits::Limiter::default(),
+            live: live::Hub::default(),
+            boards: web::leaderboards::Cache::default(),
+            networks,
+            ip_key,
+        }))
     }
 }
 
