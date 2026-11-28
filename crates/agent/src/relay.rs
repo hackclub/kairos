@@ -370,6 +370,7 @@ impl Relay {
 mod tests {
     use std::sync::mpsc::channel;
 
+    use kairos_core::account::{self, Account, DEFAULT_SERVER};
     use tiny_http::{Response, Server};
 
     use super::*;
@@ -529,11 +530,18 @@ mod tests {
     #[test]
     fn nothing_is_passed_on_without_a_saved_key_or_when_the_saved_url_is_kairos() {
         let (url, seen) = fake(vec![]);
-        for (tag, api_url, key) in [
-            ("nokey", url.clone(), None),
-            ("self", wakatime::api_url(), Some(KEY)),
+        let server = url.trim_end_matches("/api/v1");
+        for (tag, api_url, key, signed_in_to) in [
+            ("nokey", url.clone(), None, None),
+            ("self", wakatime::api_url(), Some(KEY), None),
+            // An editor key sends straight to the Kairos server, which already gets each heartbeat from this device.
+            ("server", url.clone(), Some(KEY), Some(server)),
+            ("default", format!("{DEFAULT_SERVER}/api/hackatime/v1"), Some(KEY), None),
         ] {
             let dir = Dir::new(tag);
+            if let Some(server) = signed_in_to {
+                account::save(&dir.0, &Account { server: server.into(), token: "t".into(), username: "ada".into() }).unwrap();
+            }
             dir.upstream(Some(&api_url), key);
             let relay = start(dir.0.clone(), quick(), 100, 1 << 20);
             relay.push(beat(1));
