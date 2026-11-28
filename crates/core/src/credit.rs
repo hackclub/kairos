@@ -46,6 +46,8 @@ pub const BRIDGE_WAIT_SECS: f64 = 30.0;
 /// credit_v9 takes a prompt as typed in the agent app its log names when that app's window was in front with input at
 /// most this long before it.
 pub const TYPED_HERE_SECS: f64 = 5.0;
+/// credit_v10 reads one reply for at most this long: a 4,100-word reply at READ_WPM plus THINK_SECS.
+pub const READ_MAX_SECS: f64 = 1200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,7 +81,7 @@ impl CreditClass {
 
 /// Bump it whenever the live rule (`Rule::CURRENT`), `agent_turns` or the server's span and day building would store something different (a test
 /// pins the output): a server rebuilds every user stored under an older revision when it starts.
-pub const REVISION: i32 = 9;
+pub const REVISION: i32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
@@ -91,10 +93,11 @@ pub enum Rule {
     V7,
     V8,
     V9,
+    V10,
 }
 
 impl Rule {
-    pub const CURRENT: Rule = Rule::V9;
+    pub const CURRENT: Rule = Rule::V10;
 
     pub fn name(self) -> &'static str {
         match self {
@@ -106,6 +109,7 @@ impl Rule {
             Rule::V7 => "credit_v7",
             Rule::V8 => "credit_v8",
             Rule::V9 => "credit_v9",
+            Rule::V10 => "credit_v10",
         }
     }
 
@@ -119,6 +123,7 @@ impl Rule {
             "v7" => Some(Rule::V7),
             "v8" => Some(Rule::V8),
             "v9" => Some(Rule::V9),
+            "v10" => Some(Rule::V10),
             _ => None,
         }
     }
@@ -133,6 +138,7 @@ impl Rule {
             Rule::V7 => credit_v7(events),
             Rule::V8 => credit_v8(events),
             Rule::V9 => credit_v9(events),
+            Rule::V10 => credit_v10(events),
         }
     }
 }
@@ -254,7 +260,7 @@ pub fn credit_v6(events: &[Event]) -> Vec<Credit> {
 }
 
 pub fn credit_v6_with(events: &[Event], params: &V6Params) -> Vec<Credit> {
-    credit_with(events, params, false, false, false)
+    credit_with(events, params, false, false, false, false)
 }
 
 /// credit_v6 made causal, so credit at a time depends only on events shortly after it and a bounded time before: a turn
@@ -266,7 +272,7 @@ pub fn credit_v7(events: &[Event]) -> Vec<Credit> {
 }
 
 pub fn credit_v7_with(events: &[Event], params: &V6Params) -> Vec<Credit> {
-    credit_with(events, params, true, false, false)
+    credit_with(events, params, true, false, false, false)
 }
 
 /// credit_v7 with what proves the person edited by hand while an agent runs taken from their editor: a file it saved (the
@@ -281,7 +287,7 @@ pub fn credit_v8(events: &[Event]) -> Vec<Credit> {
 }
 
 pub fn credit_v8_with(events: &[Event], params: &V6Params) -> Vec<Credit> {
-    credit_with(events, params, true, true, false)
+    credit_with(events, params, true, true, false, false)
 }
 
 /// credit_v8 where an agent app window that shows many projects fits the prompts typed in it: one whose log says the person
@@ -292,10 +298,21 @@ pub fn credit_v9(events: &[Event]) -> Vec<Credit> {
 }
 
 pub fn credit_v9_with(events: &[Event], params: &V6Params) -> Vec<Credit> {
-    credit_with(events, params, true, true, true)
+    credit_with(events, params, true, true, true, false)
 }
 
-fn credit_with(events: &[Event], params: &V6Params, v7: bool, v8: bool, v9: bool) -> Vec<Credit> {
+/// credit_v9 where watching the agent work earns nothing in a terminal or test window either: while a turn runs in the
+/// project, those seconds count only up to BRIDGE_WAIT_SECS after the person's last input, as bridging already does. And
+/// one reply is read for at most READ_MAX_SECS.
+pub fn credit_v10(events: &[Event]) -> Vec<Credit> {
+    credit_v10_with(events, &V6Params::default())
+}
+
+pub fn credit_v10_with(events: &[Event], params: &V6Params) -> Vec<Credit> {
+    credit_with(events, params, true, true, true, true)
+}
+
+fn credit_with(events: &[Event], params: &V6Params, v7: bool, v8: bool, v9: bool, v10: bool) -> Vec<Credit> {
     let mut ev: Vec<&Event> = events.iter().collect();
     ev.sort_by(|a, b| a.ts.total_cmp(&b.ts));
     let mut focus = focuses(&ev);
@@ -315,9 +332,9 @@ fn credit_with(events: &[Event], params: &V6Params, v7: bool, v8: bool, v9: bool
         typing_credits_v6(&ev, &spans, &input, &typed, params, v7),
         answered_credits(&ev, &spans, &presence, &typed, params, v7),
         editing_credits_v6(of(CreditClass::Editing), &turns, &evidence, params.edit_evidence_secs, v7),
-        of(CreditClass::Terminal),
-        of(CreditClass::Testing),
-        reading_credits_v6(&ev, &spans, &presence, &typed, params, v7),
+        waited(of(CreditClass::Terminal), &turns, &input, v10),
+        waited(of(CreditClass::Testing), &turns, &input, v10),
+        reading_credits_v6(&ev, &spans, &presence, &typed, params, v7, v10),
     ]);
     let pauses = pause_windows(&ev, v7);
     let credited = without(resolved, &pauses);
@@ -326,6 +343,25 @@ fn credit_with(events: &[Event], params: &V6Params, v7: bool, v8: bool, v9: bool
     } else {
         credited
     }
+}
+
+/// credit_v10: the seconds of `list` while a turn runs in their project and the person's last input is more than
+/// BRIDGE_WAIT_SECS back are taken out.
+fn waited(list: Vec<Credit>, turns: &[Running], input: &[Interval], v10: bool) -> Vec<Credit> {
+    if !v10 {
+        return list;
+    }
+    let recent = union(input.iter().map(|&(s, e)| (s, e + BRIDGE_WAIT_SECS)).collect());
+    let mut blocked: HashMap<Option<String>, Vec<Interval>> = HashMap::new();
+    let mut out = Vec::with_capacity(list.len());
+    for c in list {
+        let holes = blocked.entry(c.project.clone()).or_insert_with(|| {
+            let running = union(turns.iter().filter(|t| t.project == c.project.as_deref()).map(|t| (t.from, t.until)).collect());
+            minus(&running, &recent)
+        });
+        out.extend(without(vec![c], holes));
+    }
+    out
 }
 
 fn apps(ev: &[&Event]) -> Vec<(f64, Option<App>)> {
@@ -644,13 +680,14 @@ struct Reply<'a> {
     app: Option<App>,
 }
 
-fn replies<'a>(ev: &[&'a Event], typed: &Typed, params: &V6Params, v7: bool) -> Vec<Reply<'a>> {
+fn replies<'a>(ev: &[&'a Event], typed: &Typed, params: &V6Params, v7: bool, v10: bool) -> Vec<Reply<'a>> {
+    let cap = if v10 { READ_MAX_SECS } else { f64::INFINITY };
     let mut pending: HashMap<&'a str, (f64, usize, Option<&'a str>, Option<App>)> = HashMap::new();
     let mut app_of: HashMap<&'a str, Option<App>> = HashMap::new();
     let mut out = Vec::new();
     let mut close = |session: &'a str, (from, reply_words, project, app): (f64, usize, Option<&'a str>, Option<App>), until: f64| {
         let until = until.min(from + params.read_expiry_secs);
-        out.push(Reply { session, from, until, budget: 60.0 * reply_words as f64 / READ_WPM + params.think_secs, project, app });
+        out.push(Reply { session, from, until, budget: (60.0 * reply_words as f64 / READ_WPM + params.think_secs).min(cap), project, app });
     };
     for e in ev {
         match &e.kind {
@@ -680,8 +717,8 @@ fn replies<'a>(ev: &[&'a Event], typed: &Typed, params: &V6Params, v7: bool) -> 
 // Each second goes to one reply. A reply's budget is spent only by seconds a work window showing its project was in
 // front, so time elsewhere pauses it. Where several want a second, the one whose project the agent window in front
 // shows comes first, then the oldest.
-fn reading_credits_v6(ev: &[&Event], spans: &[Span], presence: &[Interval], typed: &Typed, params: &V6Params, v7: bool) -> Vec<Credit> {
-    let replies = replies(ev, typed, params, v7);
+fn reading_credits_v6(ev: &[&Event], spans: &[Span], presence: &[Interval], typed: &Typed, params: &V6Params, v7: bool, v10: bool) -> Vec<Credit> {
+    let replies = replies(ev, typed, params, v7, v10);
     let mut left: Vec<f64> = replies.iter().map(|r| r.budget).collect();
     let mut next = 0;
     let mut live: Vec<usize> = Vec::new();

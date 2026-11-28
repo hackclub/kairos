@@ -1,6 +1,6 @@
 use kairos_core::credit::{
     agent_runtime, agent_turns, credit_v1, credit_v3, credit_v4, credit_v5, credit_v6, credit_v6_with, credit_v7, credit_v7_with, credit_v8, credit_v8_with,
-    credit_v9, credit_v9_with,
+    credit_v9, credit_v9_with, credit_v10,
     total_credit_secs,
     unattributed_ai_secs, Credit, CreditClass, Rule, V6Params, PAUSE_MAX_SECS, REVISION, TURN_MAX_SECS,
 };
@@ -664,11 +664,28 @@ fn pinned_v9_events() -> Vec<Event> {
     events
 }
 
+// pinned_v9_events plus what only v10 reads: a terminal of the turn's project in front while the agent works, the person
+// present but not touching anything after the prompt.
+fn pinned_v10_events() -> Vec<Event> {
+    let mut events = pinned_v9_events();
+    let quiet = "0".repeat(15);
+    events.extend([
+        focus(7000.0, Class::Terminal, Some("o/r")),
+        present_with(7060.0, &input_bits(7060.0, &active(7000.0, 30))),
+        prompt(7030.0, 20, false),
+        present_with(7120.0, &quiet),
+        present_with(7180.0, &quiet),
+        reply(7600.0, 0),
+    ]);
+    events.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+    events
+}
+
 #[test]
 fn stored_credit_is_pinned_to_the_revision() {
-    let events = pinned_v9_events();
+    let events = pinned_v10_events();
     let out = format!("{:?}{:?}", Rule::CURRENT.apply(&events), agent_turns(&events));
-    assert_eq!((REVISION, blake3::hash(out.as_bytes()).to_hex().to_string()), (9, "07cf41417da66853b139b0cbfd098f7d8307fe141d76ef77314e2774c30eaafa".to_string()), "{out}");
+    assert_eq!((REVISION, blake3::hash(out.as_bytes()).to_hex().to_string()), (10, "a9682483b71c6ca5c1553b32ff5fa33ad5033a9d5aa2e54e2e98f73e08377088".to_string()), "{out}");
 }
 
 fn secs_in(credits: &[Credit], class: CreditClass, lo: f64, hi: f64) -> f64 {
@@ -694,7 +711,7 @@ fn v9_is_the_live_rule() {
     assert_eq!(Rule::V8.name(), "credit_v8");
     assert_eq!(Rule::parse("v9"), Some(Rule::V9));
     assert_eq!(Rule::V9.name(), "credit_v9");
-    assert_eq!(Rule::CURRENT, Rule::V9);
+    assert_eq!(Rule::CURRENT, Rule::V10);
     let events = vec![focus(0.0, Class::Editor, Some("o/r")), present(60.0), present(120.0)];
     assert_eq!(Rule::V6.apply(&events), credit_v6(&events));
     assert_eq!(credit_v6_with(&events, &V6Params::default()), credit_v6(&events));
@@ -1588,4 +1605,41 @@ fn v8_editor_time_the_gate_refused_is_not_bridged() {
     assert_eq!(secs_by(&c, CreditClass::Editing, Some("o/r")), 0.0);
     assert_eq!(secs_by(&c, CreditClass::Bridge, Some("o/r")) + secs_by(&c, CreditClass::Trip, Some("o/r")), 0.0, "{c:?}");
     assert_eq!(secs_by(&credit(true), CreditClass::Editing, Some("o/r")), 120.0, "a hand edit vouches for it");
+}
+
+// A plain terminal of o/r in front, half a minute of typing, then the agent works from 30 to 600 while the person stays
+// at the keyboard without touching it (kairosd still marks them present). credit_v9 credits the terminal while they're
+// present; credit_v10 stops half a minute after their last input, as bridging does.
+#[test]
+fn v10_watching_the_agent_from_a_terminal_earns_only_the_wait() {
+    let quiet = "0".repeat(15);
+    let events = vec![
+        focus(0.0, Class::Terminal, Some("o/r")),
+        present_with(60.0, &input_bits(60.0, &active(0.0, 30))),
+        prompt(30.0, 20, false),
+        present_with(120.0, &quiet),
+        present_with(180.0, &quiet),
+        reply(600.0, 0),
+    ];
+    assert_eq!(secs_by(&credit_v9(&events), CreditClass::Terminal, Some("o/r")), 180.0);
+    assert_eq!(secs_by(&credit_v10(&events), CreditClass::Terminal, Some("o/r")), 60.0);
+    let mut later = events.clone();
+    later.push(present_with(240.0, &input_bits(240.0, &active(200.0, 2))));
+    later.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+    assert_eq!(secs_by(&credit_v10(&later), CreditClass::Terminal, Some("o/r")), 92.0, "and half a minute after a key press during the turn");
+}
+
+// A 10,000-word reply read with the agent terminal in front and input every second for 50 minutes: credit_v9 gives it
+// the whole reading budget (about 45 minutes), credit_v10 at most 20.
+#[test]
+fn v10_one_reply_is_read_for_at_most_twenty_minutes() {
+    let mut events = vec![focus(0.0, Class::AgentTerminal, Some("o/r")), prompt(50.0, 20, false), reply(60.0, 10_000)];
+    events.extend((1..=50).map(|m| present_with(60.0 * f64::from(m), &"f".repeat(15))));
+    events.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+    let v9 = secs_by(&credit_v9(&events), CreditClass::Reading, Some("o/r"));
+    assert!(v9 > 2600.0, "{v9}");
+    assert_eq!(secs_by(&credit_v10(&events), CreditClass::Reading, Some("o/r")), 1200.0);
+    assert_eq!(Rule::parse("v10"), Some(Rule::V10));
+    assert_eq!(Rule::V10.name(), "credit_v10");
+    assert_eq!(Rule::V10.apply(&events), credit_v10(&events));
 }
