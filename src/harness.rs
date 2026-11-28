@@ -19,6 +19,8 @@ pub struct Launch {
     pub env: Vec<(String, String)>,
     /// Arguments for one more call of the program once the run is over, to stop what it left running.
     pub after: Vec<String>,
+    /// Codex: before it opens its session again, the session is archived and unarchived with its own commands.
+    pub archive: bool,
 }
 
 pub enum Source {
@@ -247,7 +249,7 @@ fn claude(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Resu
         ("DISABLE_AUTOUPDATER", "1"),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ];
-    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new() })
+    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new(), archive: false })
 }
 
 fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -264,7 +266,7 @@ fn codex(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result
     });
     config += &format!("\n[projects.'{}']\ntrust_level = \"trusted\"\n", project.display());
     fs::write(&path, config)?;
-    Ok(Launch { args: Vec::new(), resume: vec!["resume".to_string(), "--last".to_string()], env: vars(&[("LAB_KEY", "lab")]), after: Vec::new() })
+    Ok(Launch { args: Vec::new(), resume: vec!["resume".to_string(), "--last".to_string()], env: vars(&[("LAB_KEY", "lab")]), after: Vec::new(), archive: true })
 }
 
 fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Result<Launch> {
@@ -285,7 +287,7 @@ fn opencode(home: &Path, _project: &Path, model_url: &str, version: &str) -> Res
     };
     fs::write(dir.join("opencode.json"), serde_json::to_string_pretty(&config)?)?;
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
-    Ok(Launch { args, resume, env: vars(&[("LAB_KEY", "lab")]), after })
+    Ok(Launch { args, resume, env: vars(&[("LAB_KEY", "lab")]), after, archive: false })
 }
 
 fn copilot(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -300,7 +302,7 @@ fn copilot(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Re
         ("COPILOT_MODEL", "gpt-5"),
     ];
     let args = vec!["--allow-all-tools".to_string()];
-    Ok(Launch { args: args.clone(), resume: args.into_iter().chain(["--continue".to_string()]).collect(), env: vars(&env), after: Vec::new() })
+    Ok(Launch { args: args.clone(), resume: args.into_iter().chain(["--continue".to_string()]).collect(), env: vars(&env), after: Vec::new(), archive: false })
 }
 
 fn pi(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -311,7 +313,7 @@ fn pi(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<L
     fs::write(dir.join("settings.json"), serde_json::to_string_pretty(&json!({ "defaultProvider": "lab", "defaultModel": "test-model" }))?)?;
     // Offline it fetches no model list or tools at start.
     let env = [("PI_OFFLINE", "1"), ("PI_SKIP_VERSION_CHECK", "1"), ("PI_TELEMETRY", "0")];
-    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new() })
+    Ok(Launch { args: Vec::new(), resume: vec!["--continue".to_string()], env: vars(&env), after: Vec::new(), archive: false })
 }
 
 fn qwen(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -324,7 +326,7 @@ fn qwen(home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result
     let env = [("OPENAI_API_KEY", "lab"), ("OPENAI_BASE_URL", base.as_str()), ("OPENAI_MODEL", "test-model")];
     let args = vec!["--yolo".to_string()];
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
-    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new(), archive: false })
 }
 
 fn gemini(home: &Path, project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -343,7 +345,7 @@ fn gemini(home: &Path, project: &Path, model_url: &str, _version: &str) -> Resul
     let env = [("GEMINI_API_KEY", "lab"), ("GOOGLE_GEMINI_BASE_URL", model_url), ("CI", "false"), ("GITHUB_ACTIONS", "false")];
     let args = vec!["--yolo".to_string()];
     let resume = args.iter().cloned().chain(["--resume".to_string(), "latest".to_string()]).collect();
-    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new(), archive: false })
 }
 
 fn antigravity(_home: &Path, _project: &Path, model_url: &str, _version: &str) -> Result<Launch> {
@@ -357,7 +359,7 @@ fn antigravity(_home: &Path, _project: &Path, model_url: &str, _version: &str) -
     ];
     let args = vec!["--dangerously-skip-permissions".to_string()];
     let resume = args.iter().cloned().chain(["--continue".to_string()]).collect();
-    Ok(Launch { args, resume, env: vars(&env), after: Vec::new() })
+    Ok(Launch { args, resume, env: vars(&env), after: Vec::new(), archive: false })
 }
 
 /// Google's manifest of the newest agy for this machine.

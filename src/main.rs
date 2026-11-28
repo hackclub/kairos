@@ -640,6 +640,38 @@ fn serve(project: &str) -> Result<bool> {
 }
 
 /// The harness started the way a person starts it in a terminal.
+/// What the Codex app does when a person archives a thread and opens it again later: the rollout moves out of the sessions
+/// folder and comes back with a new modified time (#56). Apart long enough for kairosd to see it gone.
+fn archive_and_back(bin: &Path, project: &Path, home: &Path) -> Result<()> {
+    let (mut dirs, mut rollouts) = (vec![home.join(".codex").join("sessions")], Vec::new());
+    while let Some(dir) = dirs.pop() {
+        for e in fs::read_dir(&dir)?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "jsonl") {
+                rollouts.push(p);
+            }
+        }
+    }
+    let newest = rollouts.into_iter().max_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok()).context("Codex left no session")?;
+    let stem = newest.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let id = stem.get(stem.len().saturating_sub(36)..).unwrap_or_default();
+    for step in ["archive", "unarchive"] {
+        let mut cmd = Command::new(bin);
+        cmd.args([step, id]).current_dir(project).env("HOME", home).env("USERPROFILE", home).stdin(Stdio::null());
+        for k in STRAY_ENV {
+            cmd.env_remove(k);
+        }
+        let out = cmd.output().with_context(|| format!("codex {step}"))?;
+        if !out.status.success() {
+            bail!("codex {step} {id} failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+        sleep(Duration::from_secs(7));
+    }
+    Ok(())
+}
+
 fn command(bin: &Path, args: &[String], project: &Path, home: &Path, env: &[(String, String)]) -> CommandBuilder {
     // npm's launchers on Windows are batch files, which only cmd can start.
     let mut cmd = if bin.extension().is_some_and(|e| e == "cmd") {
@@ -789,7 +821,12 @@ fn run() -> Result<bool> {
     if args.window {
         wait_focus(kd, window, "proj", 0.0)?;
     }
-    let mut reopen = || open(&launch.resume, "pty2.raw");
+    let mut reopen = || {
+        if launch.archive {
+            archive_and_back(&bin, project, home)?;
+        }
+        open(&launch.resume, "pty2.raw")
+    };
     let mut restart = || -> Result<()> {
         let _ = daemon.kill();
         let _ = daemon.wait();
