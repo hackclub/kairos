@@ -3,7 +3,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use walkdir::WalkDir;
 
 use super::{string_words, uri_path, work, words, Found, Source, Tail};
 use crate::event::{App, Ask, Kind};
@@ -351,12 +352,26 @@ fn feed(t: &mut Turn, e: &Value, out: &mut Vec<Found>) {
 pub struct Codex {
     tail: Tail,
     turns: HashMap<PathBuf, Turn>,
+    // The newest line read from each thread. Codex writes a thread's lines out again (unarchiving moves the rollout back
+    // with a new time, migrating an old one rewrites it, a compressed one is put back), and those must not be reported twice.
+    read: HashMap<String, f64>,
+    archived: Vec<PathBuf>,
 }
+
+// An archived thread can be opened again months later.
+const READ_KEPT: f64 = 365.0 * 86400.0;
 
 impl Codex {
     pub fn new(roots: Vec<PathBuf>) -> Codex {
-        Codex { tail: Tail::new(roots, "jsonl", |_| false), turns: HashMap::new() }
+        let archived = roots.iter().filter_map(|r| Some(r.parent()?.join("archived_sessions"))).collect();
+        Codex { tail: Tail::new(roots, "jsonl", |_| false), turns: HashMap::new(), read: HashMap::new(), archived }
     }
+}
+
+// rollout-<time>-<thread>.jsonl, or rollout-<time>-<thread>_<rollout>.jsonl for a reverted thread.
+fn thread_of(path: &Path) -> Option<&str> {
+    let ids = path.file_stem()?.to_str()?.strip_prefix("rollout-")?.get(20..)?;
+    Some(ids.split_once('_').map_or(ids, |(thread, _)| thread))
 }
 
 impl Source for Codex {
@@ -366,27 +381,56 @@ impl Source for Codex {
 
     fn poll(&mut self) -> Vec<Found> {
         let mut out = Vec::new();
-        let turns = &mut self.turns;
-        self.tail.poll(|path, line| {
-            if let Ok(e) = serde_json::from_str::<Value>(line) {
-                let t = turns.entry(path.to_path_buf()).or_default();
-                if !t.known {
-                    t.head(path);
-                }
-                feed(t, &e, &mut out);
+        let (turns, read) = (&mut self.turns, &mut self.read);
+        // A rollout read from its start still sets up its turn from the lines already read, but reports only what's newer.
+        let mut cuts: HashMap<PathBuf, Option<f64>> = HashMap::new();
+        self.tail.poll_lines(|path, line, from_start| {
+            let Ok(e) = serde_json::from_str::<Value>(line) else { return };
+            let Some(ts) = timestamp(&e) else { return };
+            let t = turns.entry(path.to_path_buf()).or_default();
+            if !t.known {
+                t.head(path);
+            }
+            let cut = if from_start { *cuts.entry(path.to_path_buf()).or_insert_with(|| read.get(&t.session).copied()) } else { None };
+            let before = out.len();
+            feed(t, &e, &mut out);
+            if cut.is_some_and(|c| ts <= c) {
+                out.truncate(before);
+            }
+            if !t.session.is_empty() {
+                let r = read.entry(t.session.clone()).or_insert(ts);
+                *r = r.max(ts);
             }
         });
+        let newest = self.read.values().copied().fold(f64::MIN, f64::max);
+        self.read.retain(|_, ts| *ts > newest - READ_KEPT);
         self.turns.retain(|p, _| p.exists());
         out.sort_by(|a, b| a.ts.total_cmp(&b.ts));
         out
     }
 
     fn state(&self) -> Value {
-        self.tail.state()
+        let mut state = self.tail.state();
+        state["read"] = json!(self.read);
+        state
     }
 
     fn restore(&mut self, state: &Value) {
         self.tail.restore(state);
+        if let Some(read) = state.get("read").and_then(Value::as_object) {
+            self.read.extend(read.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64()?))));
+            return;
+        }
+        // Saved before threads were kept: what the rollouts held at the last poll was read, and so was every archived one.
+        // A little before it, for lines Codex was still writing out then.
+        let Some(since) = state.get("since").and_then(Value::as_f64) else { return };
+        let saved = state.get("files").and_then(Value::as_object).into_iter().flat_map(|f| f.keys()).map(PathBuf::from);
+        let archived = self.archived.iter().flat_map(|d| WalkDir::new(d).into_iter().filter_map(Result::ok).map(|e| e.into_path()));
+        for path in saved.chain(archived) {
+            if let Some(thread) = thread_of(&path) {
+                self.read.insert(thread.to_string(), since - 10.0);
+            }
+        }
     }
 }
 
@@ -531,6 +575,96 @@ mod tests {
         let out = src.poll();
         assert_eq!(names(&out), ["prompt", "agent_start"]);
         assert!(matches!(&out[0].kind, Kind::Prompt { session, .. } if session == "s1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rollouts(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kairos-codex-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions/2026/11/19")).unwrap();
+        std::fs::create_dir_all(dir.join("archived_sessions")).unwrap();
+        dir
+    }
+
+    const ROLLOUT: &str = "sessions/2026/11/19/rollout-2026-11-19T09-59-59-s1.jsonl";
+    const ARCHIVED: &str = "archived_sessions/rollout-2026-11-19T09-59-59-s1.jsonl";
+
+    fn first_turn() -> String {
+        format!("{META}\n{START}\n{CTX}\n{USER}\n{SAY}\n{TOOL}\n{FINAL}\n{DONE}\n")
+    }
+
+    fn second_turn(minute: &str) -> String {
+        [START, CTX, USER, TOOL].iter().map(|l| format!("{}\n", l.replacen("T10:00:", &format!("T10:{minute}:"), 1))).collect()
+    }
+
+    #[test]
+    fn a_thread_codex_writes_out_again_is_reported_once() {
+        let dir = rollouts("again");
+        let f = dir.join(ROLLOUT);
+        let mut src = Codex::new(vec![dir.join("sessions")]);
+        assert!(src.poll().is_empty());
+        std::fs::write(&f, first_turn()).unwrap();
+        assert_eq!(names(&src.poll()), ["prompt", "agent_start", "reply_done"], "a new rollout, its lines older than the last poll");
+        // Rewritten shorter where it is, like Codex migrating an old rollout.
+        std::fs::write(&f, first_turn().replace(&format!("{SAY}\n"), "")).unwrap();
+        assert!(src.poll().is_empty());
+        // Compressed after a week, put back when the thread resumes.
+        let zst = f.with_extension("jsonl.zst");
+        std::fs::rename(&f, &zst).unwrap();
+        assert!(src.poll().is_empty());
+        std::fs::rename(&zst, &f).unwrap();
+        std::fs::write(&f, first_turn() + &second_turn("05")).unwrap();
+        let out = src.poll();
+        assert_eq!(names(&out), ["prompt", "agent_start"]);
+        assert_eq!(out[0].ts - ts_of(USER), 300.0);
+        // Archived, then opened again: Codex moves it back with a new time.
+        std::fs::rename(&f, dir.join(ARCHIVED)).unwrap();
+        assert!(src.poll().is_empty());
+        std::fs::rename(dir.join(ARCHIVED), &f).unwrap();
+        assert!(src.poll().is_empty());
+        std::fs::write(&f, first_turn() + &second_turn("05") + &second_turn("07")).unwrap();
+        assert_eq!(names(&src.poll()), ["reply_done", "prompt", "agent_start"], "the 10:05 turn ends once, when the next one starts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn ts_of(line: &str) -> f64 {
+        timestamp(&serde_json::from_str(line).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn rollouts_read_before_threads_were_kept_are_not_reported_again() {
+        let dir = rollouts("update");
+        let f = dir.join(ROLLOUT);
+        std::fs::write(&f, first_turn()).unwrap();
+        let len = std::fs::metadata(&f).unwrap().len();
+        let since = ts_of(r#"{"timestamp":"2026-11-19T10:02:00Z"}"#);
+        let mut src = Codex::new(vec![dir.join("sessions")]);
+        src.restore(&json!({ "since": since, "files": { f.to_string_lossy().to_string(): len } }));
+        let shorter = first_turn().replace(&format!("{SAY}\n"), "");
+        std::fs::write(&f, &shorter).unwrap();
+        assert!(src.poll().is_empty());
+        std::fs::write(&f, shorter.clone() + &second_turn("05")).unwrap();
+        assert_eq!(names(&src.poll()), ["prompt", "agent_start"]);
+        // And what's kept survives a restart.
+        let mut again = Codex::new(vec![dir.join("sessions")]);
+        again.restore(&src.state());
+        std::fs::write(&f, &shorter).unwrap();
+        assert!(again.poll().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_thread_archived_before_threads_were_kept_is_not_reported_again() {
+        let dir = rollouts("archived");
+        std::fs::write(dir.join(ARCHIVED), first_turn()).unwrap();
+        let since = ts_of(r#"{"timestamp":"2026-11-19T10:02:00Z"}"#);
+        let mut src = Codex::new(vec![dir.join("sessions")]);
+        src.restore(&json!({ "since": since, "files": {} }));
+        let f = dir.join(ROLLOUT);
+        std::fs::rename(dir.join(ARCHIVED), &f).unwrap();
+        assert!(src.poll().is_empty());
+        std::fs::write(&f, first_turn() + &second_turn("05")).unwrap();
+        assert_eq!(names(&src.poll()), ["prompt", "agent_start"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -47,6 +47,12 @@ impl Tail {
     }
 
     pub fn poll(&mut self, mut each: impl FnMut(&Path, &str)) {
+        self.poll_lines(|path, line, _| each(path, line));
+    }
+
+    /// Also says whether the read began at the file's start: a new file, or one rewritten or put back since the last
+    /// poll, which can hold lines already read before the rewrite or under another name.
+    pub fn poll_lines(&mut self, mut each: impl FnMut(&Path, &str, bool)) {
         let started = now();
         let mut files = Vec::new();
         for root in &self.roots {
@@ -85,7 +91,7 @@ impl Tail {
             };
             for line in String::from_utf8_lossy(&buf[..end]).lines() {
                 if !line.trim().is_empty() {
-                    each(&path, line);
+                    each(&path, line, off == 0);
                 }
             }
             self.offsets.insert(path, off + end as u64 + 1);
