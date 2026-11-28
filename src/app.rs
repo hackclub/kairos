@@ -398,7 +398,9 @@ fn vscode_start(port: u16) -> Result<Page> {
     let mut looked = false;
     while !picked(&mut page)? {
         if Instant::now() > until {
-            bail!("the chat never offered the lab's model. Page:\n{}", page.text()?);
+            // The page's text alone came back empty once on a Mac.
+            let names: Vec<String> = page.ax()?.into_iter().map(|(r, n, _)| format!("{r}: {n}")).take(80).collect();
+            bail!("the chat never offered the lab's model. Page:\n{}\nAccessibility names:\n{}", page.text()?, names.join("\n"));
         }
         // Until the person opens the list of models once, the chat shows a note about adding one.
         if !looked && page.text()?.contains("Add Models") {

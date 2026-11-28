@@ -439,8 +439,11 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         let e = e?;
         if e.file_type()?.is_dir() {
             copy_dir(&e.path(), &to.join(e.file_name()))?;
-        } else {
-            fs::copy(e.path(), to.join(e.file_name()))?;
+        } else if let Err(err) = fs::copy(e.path(), to.join(e.file_name())) {
+            // A harness still shutting down drops its lock files while they're copied.
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err.into());
+            }
         }
     }
     Ok(())
