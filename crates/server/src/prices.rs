@@ -164,7 +164,8 @@ pub fn spawn(st: St) {
 }
 
 /// Names a harness writes for a model, most exact first, in the forms LiteLLM keys use: a provider in front
-/// (`anthropic/…`), a release date (`-20251101`), dots for dashes (`4.5`), a reasoning effort (`-high`).
+/// (`anthropic/…`), a release date (`-20251101`), dots for dashes (`4.5`), a reasoning effort (`-high`). After
+/// the bare forms come the same forms behind the model family's own provider, never a reseller.
 pub fn candidates(model: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: String| {
@@ -187,7 +188,32 @@ pub fn candidates(model: &str) -> Vec<String> {
             }
         }
     }
+    let prefixed: Vec<String> = out
+        .iter()
+        .filter(|s| !s.contains('/'))
+        .filter_map(|s| first_party(s).map(|p| format!("{p}/{s}")))
+        .collect();
+    for s in prefixed {
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
     out
+}
+
+fn first_party(s: &str) -> Option<&'static str> {
+    let b = s.as_bytes();
+    if s.starts_with("gemini-") {
+        Some("gemini")
+    } else if s.starts_with("claude-") {
+        Some("anthropic")
+    } else if s.starts_with("gpt-") || (b.len() > 1 && b[0] == b'o' && b[1].is_ascii_digit()) {
+        Some("openai")
+    } else if s.starts_with("grok-") {
+        Some("xai")
+    } else {
+        None
+    }
 }
 
 fn strip_date(s: &str) -> String {
@@ -230,10 +256,39 @@ mod tests {
 
     #[test]
     fn names_try_the_exact_one_first_then_plainer_forms() {
-        assert_eq!(candidates("claude-opus-5-5"), vec!["claude-opus-5-5"]);
-        assert_eq!(candidates("claude-sonnet-4-5-20250929"), vec!["claude-sonnet-4-5-20250929", "claude-sonnet-4-5"]);
-        assert_eq!(candidates("gemini-3.8-flash-high"), vec!["gemini-3.8-flash-high", "gemini-3-8-flash-high", "gemini-3.8-flash", "gemini-3-8-flash"]);
+        assert_eq!(candidates("claude-opus-5-5"), vec!["claude-opus-5-5", "anthropic/claude-opus-5-5"]);
+        assert_eq!(
+            candidates("claude-sonnet-4-5-20250929"),
+            vec!["claude-sonnet-4-5-20250929", "claude-sonnet-4-5", "anthropic/claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5"]
+        );
+        assert_eq!(
+            candidates("gemini-3.8-flash-high")[..4],
+            ["gemini-3.8-flash-high", "gemini-3-8-flash-high", "gemini-3.8-flash", "gemini-3-8-flash"]
+        );
         assert_eq!(candidates("Z-AI/GLM-5.3"), vec!["z-ai/glm-5.3", "z-ai/glm-5-3", "glm-5.3", "glm-5-3"]);
+    }
+
+    #[test]
+    fn the_family_provider_comes_after_the_bare_forms() {
+        assert_eq!(
+            candidates("gemini-4-hydrogen-high"),
+            vec!["gemini-4-hydrogen-high", "gemini-4-hydrogen", "gemini/gemini-4-hydrogen-high", "gemini/gemini-4-hydrogen"]
+        );
+        assert_eq!(candidates("gpt-5.5"), vec!["gpt-5.5", "gpt-5-5", "openai/gpt-5.5", "openai/gpt-5-5"]);
+        assert_eq!(candidates("o3-mini"), vec!["o3-mini", "openai/o3-mini"]);
+        assert_eq!(candidates("grok-4"), vec!["grok-4", "xai/grok-4"]);
+        assert_eq!(candidates("gemini/gemini-4-argon"), vec!["gemini/gemini-4-argon", "gemini-4-argon"]);
+    }
+
+    #[test]
+    fn a_reseller_key_is_never_a_candidate() {
+        for m in ["gemini-4-hydrogen", "gemini-4-hydrogen-20261101", "claude-opus-5-5", "gpt-5.5", "grok-4"] {
+            for c in candidates(m) {
+                assert!(!c.starts_with("openrouter/") && !c.starts_with("databricks/") && !c.starts_with("vertex_ai/"), "{m} gave {c}");
+            }
+        }
+        assert!(!candidates("gemini-4-hydrogen").iter().any(|c| c.starts_with("databricks/")));
+        assert!(candidates("some-new-model").iter().all(|c| !c.contains('/')));
     }
 
     #[test]
