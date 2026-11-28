@@ -14,10 +14,10 @@ env:
   # Empty means the version kairos.hackclub.com serves, the one people run.
   KAIROS: ""
   # A ci run on main, to try its kairosd before it becomes a release.
-  CANDIDATE: "46130652911"
+  CANDIDATE: ""
   # For trying one thing: a pattern for the lines of versions.txt to run, and the systems to run them on (linux, windows,
   # macos). Empty means all.
-  ONLY: '^codex (0.167.2|latest) ?$|^codex latest tmux$'
+  ONLY: ''
   SYSTEMS: ''
   # The list of runs: versions.txt, or ci/mux.txt for the screen runs (not working yet).
   VERSIONS: versions.txt

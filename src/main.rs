@@ -577,6 +577,7 @@ const KNOWN: &[Known] = &[
     Known { bug: 54, harness: "qwen-code", fixed: "", text: "of credit was testing in project" },
     Known { bug: 55, harness: "gemini-cli", fixed: "", text: "Kairos saw" },
     Known { bug: 55, harness: "gemini-cli", fixed: "", text: "turn " },
+    Known { bug: 56, harness: "codex", fixed: "0.1.26", text: "Kairos saw 16 prompts, the lab typed 11" },
 ];
 
 fn kairosd_version(kairosd: &Path) -> Result<String> {
