@@ -276,13 +276,14 @@ fn dbus_kwin_service_receives_focus_and_notices_kwin_leaving() {
     assert!(script.contains("callDBus(\"dev.obayy.Kairos\""));
 
     let client = Connection::session().unwrap();
-    let call = |pid: &str, class: &str, caption: &str| {
-        client.call_method(Some("dev.obayy.Kairos"), "/Focus", Some("dev.obayy.Kairos.Focus"), "Activated", &(pid, class, caption)).unwrap();
+    let call = |pid: &str, class: &str, caption: &str, window: &str| {
+        client.call_method(Some("dev.obayy.Kairos"), "/Focus", Some("dev.obayy.Kairos.Focus"), "Activated", &(pid, class, caption, window)).unwrap();
     };
-    call("4242", "kitty", "~");
+    call("4242", "kitty", "~", "{0b5e}");
     let fg = foreground_with_pid(&rx, 4242);
     assert_eq!((fg.wclass.as_str(), fg.title.as_str()), ("kitty", "~"));
-    call("0", "", "");
+    assert_ne!(fg.window, 0);
+    call("0", "", "", "");
     assert_eq!(rx.recv_timeout(WAIT).unwrap(), None);
 
     drop(kwin_conn);
