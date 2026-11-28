@@ -316,7 +316,7 @@ mod tests {
         let mut prev = GENESIS.to_string();
         (0..n)
             .map(|i| {
-                let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None });
+                let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None, keys: None, injected: None });
                 e.seal(&prev);
                 prev = e.hash.clone();
                 e
@@ -424,7 +424,7 @@ mod tests {
     }
 
     fn record(dir: &Path, ts: f64) -> Event {
-        crate::log::Log::open(&dir.to_path_buf()).unwrap().append(Event::new(ts, None, Kind::Present { input: None })).unwrap()
+        crate::log::Log::open(&dir.to_path_buf()).unwrap().append(Event::new(ts, None, Kind::Present { input: None, keys: None, injected: None })).unwrap()
     }
 
     #[test]

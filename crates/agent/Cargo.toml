@@ -45,7 +45,7 @@ libc = "=0.2.190"
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
 ksni = { version = "=0.3.7", default-features = false, features = ["async-io", "blocking"] }
-x11rb = { version = "=0.14.0", features = ["screensaver"] }
+x11rb = { version = "=0.14.0", features = ["screensaver", "sync", "xinput"] }
 zbus = "=5.19.0"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]

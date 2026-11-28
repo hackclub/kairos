@@ -61,12 +61,12 @@ fn input_outside_the_window_is_dropped() {
 
 #[test]
 fn a_present_with_input_round_trips_and_one_without_leaves_the_field_off() {
-    let with = Kind::Present { input: Some("800000000000001".into()) };
+    let with = Kind::Present { input: Some("800000000000001".into()), keys: None, injected: None };
     let v = serde_json::to_value(&with).unwrap();
     assert_eq!(v, json!({ "kind": "present", "input": "800000000000001" }));
     assert_eq!(serde_json::from_value::<Kind>(v).unwrap(), with);
 
-    let without = Kind::Present { input: None };
+    let without = Kind::Present { input: None, keys: None, injected: None };
     let v = serde_json::to_value(&without).unwrap();
     assert_eq!(v, json!({ "kind": "present" }));
     assert_eq!(serde_json::from_value::<Kind>(v).unwrap(), without);
@@ -79,12 +79,12 @@ fn an_old_present_line_still_verifies_and_hashes_the_same() {
     assert!(verify_chain(std::iter::once(old.as_str()), Some(GENESIS)).is_ok());
 
     let mut e: Event = serde_json::from_str(&old).unwrap();
-    assert_eq!(e.kind, Kind::Present { input: None });
+    assert_eq!(e.kind, Kind::Present { input: None, keys: None, injected: None });
     assert_eq!(serde_json::to_string(&e).unwrap(), old);
     e.seal(GENESIS);
     assert_eq!(e.hash, OLD_HASH);
 
-    let mut new = Event::new(1000.5, None, Kind::Present { input: Some("000000000000001".into()) });
+    let mut new = Event::new(1000.5, None, Kind::Present { input: Some("000000000000001".into()), keys: None, injected: None });
     new.seal(GENESIS);
     assert_ne!(new.hash, OLD_HASH);
     let line = serde_json::to_string(&new).unwrap();

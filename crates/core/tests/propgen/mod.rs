@@ -167,7 +167,7 @@ impl Gen<'_> {
             self.input()
         };
         let ts = self.whole();
-        self.push(ts, None, None, Kind::Present { input });
+        self.push(ts, None, None, Kind::Present { input, keys: None, injected: None });
     }
 
     fn presents(&mut self, n: usize) {

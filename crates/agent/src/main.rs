@@ -55,6 +55,11 @@ pub enum Msg {
     InputReady,
     /// The unix second of an input, sent at most about once a second.
     Input(f64),
+    /// Sent after `InputReady` by backends that also tell key presses and injected input apart, which they then report
+    /// like `Input`.
+    InputKinds { keys: bool, injected: bool },
+    Keys(f64),
+    Injected(f64),
     PresenceLost,
     Resumed,
     Idled,

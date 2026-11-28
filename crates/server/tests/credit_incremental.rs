@@ -331,7 +331,7 @@ fn incremental_equals_full_for_a_long_turn_and_a_long_pause_uploaded_as_they_hap
     let h = 3600.0;
     let t0 = BASE + h;
     let at = |ts: f64, project: Option<&str>, kind: Kind| Event::new(ts, project.map(str::to_string), kind);
-    let presents = |from: f64| (1..=10).map(move |i| Event::new(from + 60.0 * f64::from(i), None, Kind::Present { input: None }));
+    let presents = |from: f64| (1..=10).map(move |i| Event::new(from + 60.0 * f64::from(i), None, Kind::Present { input: None, keys: None, injected: None }));
     let p = Some("ada/site");
     let mut batches = vec![
         vec![
@@ -383,7 +383,7 @@ fn incremental_equals_full_when_the_focus_before_the_context_shares_its_timestam
     let t0 = BASE + h;
     let p = Some("ada/api".to_string());
     let focus = |class: Class, project: Option<String>| Event::new(t0, project, Kind::Focus { class, app: None });
-    let presents = |from: f64| (1..=10).map(move |i| Event::new(from + 60.0 * f64::from(i), None, Kind::Present { input: None })).collect::<Vec<_>>();
+    let presents = |from: f64| (1..=10).map(move |i| Event::new(from + 60.0 * f64::from(i), None, Kind::Present { input: None, keys: None, injected: None })).collect::<Vec<_>>();
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let app = rt.block_on(TestApp::new());
     let result = rt.block_on(async {
@@ -428,7 +428,7 @@ fn agent_time_stays_with_the_turns_start_when_its_reply_names_another_project() 
         at(t0 + h, Some("ada/lib"), Kind::AgentStart { session: "s2".into() }),
         at(t0 + h + 600.0, Some("ada/api"), done("s2")),
     ];
-    all.extend((1..300).map(|i| at(t0 + 60.0 * f64::from(i) + 1.0, None, Kind::Present { input: None })));
+    all.extend((1..300).map(|i| at(t0 + 60.0 * f64::from(i) + 1.0, None, Kind::Present { input: None, keys: None, injected: None })));
     all.sort_by(|a, b| a.ts.total_cmp(&b.ts));
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let app = rt.block_on(TestApp::new());

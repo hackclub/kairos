@@ -140,6 +140,30 @@ fn x11_idle_follows_input() {
 }
 
 #[test]
+#[ignore = "needs Xvfb, see tests/linux-desktops"]
+fn x11_idle_tells_xtest_input_from_key_presses() {
+    let (tx, rx) = mpsc::channel();
+    let _run = x11::start_idle(&session_env(), tx, Duration::from_secs(60)).expect("x11 idle backend");
+    expect_msg(&rx, |m| matches!(m, Msg::InputKinds { keys: true, injected: true }), "InputKinds");
+    std::thread::sleep(Duration::from_secs(1));
+    while rx.try_recv().is_ok() {}
+    let before = crate::now() - 0.5;
+    tool("xdotool", &["key", "a"]);
+    tool("xdotool", &["mousemove_relative", "--", "5", "5"]);
+    let (mut injected, mut keys) = (0, 0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(Msg::Injected(t)) if t >= before => injected += 1,
+            Ok(Msg::Keys(t)) if t >= before => keys += 1,
+            _ => {}
+        }
+    }
+    assert!(injected > 0, "xdotool's input comes from the XTEST devices");
+    assert_eq!(keys, 0, "and is no key press on a keyboard");
+}
+
+#[test]
 #[ignore = "needs a Sway session, see tests/linux-desktops"]
 fn sway_focus_follows_focused_windows() {
     let env = session_env();

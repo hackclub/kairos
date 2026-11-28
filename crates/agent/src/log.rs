@@ -111,7 +111,7 @@ mod tests {
     }
 
     fn present(ts: f64) -> Event {
-        Event::new(ts, None, Kind::Present { input: None })
+        Event::new(ts, None, Kind::Present { input: None, keys: None, injected: None })
     }
 
     fn sent(dir: &Path) -> Vec<String> {

@@ -1125,7 +1125,7 @@ fn presents(ev: &[&Event]) -> Vec<(f64, f64, Option<u64>)> {
     let idles: Vec<f64> = ev.iter().filter(|e| matches!(e.kind, Kind::Idle {})).map(|e| e.ts).collect();
     let mut out = Vec::new();
     for p in ev {
-        let Kind::Present { input } = &p.kind else { continue };
+        let Kind::Present { input, .. } = &p.kind else { continue };
         let last_idle = idles[..idles.partition_point(|&t| t <= p.ts)].last().copied();
         let lo = (p.ts - PRESENT_SECS).max(last_idle.unwrap_or(f64::MIN));
         if p.ts > lo {

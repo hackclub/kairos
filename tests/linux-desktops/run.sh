@@ -12,6 +12,7 @@ docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" tes
 
 bin=$(cargo test -p kairos-agent --no-run 2>&1 | sed -n 's/^ *Executable unittests src\/main.rs (\(.*\))$/\1/p')
 [ -x "$bin" ] || { echo "test binary not found" >&2; exit 1; }
+bin=$(realpath "$bin")
 
 status=0
 for s in $scenarios; do

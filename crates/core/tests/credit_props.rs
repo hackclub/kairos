@@ -100,7 +100,7 @@ fn model(events: &[Event], rule: Rule) -> Model<'_> {
     let idles: Vec<f64> = ev.iter().filter(|e| matches!(e.kind, Kind::Idle {})).map(|e| e.ts).collect();
     let (mut windows, mut input) = (Vec::new(), Vec::new());
     for p in &ev {
-        let Kind::Present { input: bits } = &p.kind else { continue };
+        let Kind::Present { input: bits, .. } = &p.kind else { continue };
         let last_idle = idles.iter().copied().filter(|&t| t <= p.ts).fold(f64::MIN, f64::max);
         let lo = (p.ts - PRESENT_SECS).max(last_idle);
         if p.ts <= lo {

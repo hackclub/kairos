@@ -343,7 +343,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let (mut prev, mut text, mut hashes) = (GENESIS.to_string(), String::new(), Vec::new());
         for i in 0..5 {
-            let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None });
+            let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None, keys: None, injected: None });
             e.seal(&prev);
             prev = e.hash.clone();
             text.push_str(&serde_json::to_string(&e).unwrap());

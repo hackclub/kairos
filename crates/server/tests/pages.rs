@@ -134,7 +134,7 @@ async fn june(app: &TestApp, ada: &mut Browser<'_>) {
     agent_run(&mut c, local(0.0, 14.0, 40.0), local(0.0, 14.0, 55.0), "ada/other", "codex");
     c.push(local(0.0, 16.0, 0.0), None, Kind::Focus { class: Class::Editor, app: None });
     for i in 1..=10 {
-        c.push(local(0.0, 16.0, i as f64), None, Kind::Present { input: None });
+        c.push(local(0.0, 16.0, i as f64), None, Kind::Present { input: None, keys: None, injected: None });
     }
     c.editing("ada/site", local(1.0, 6.0, 0.0), local(1.0, 19.5, 0.0));
     c.push_from(local(2.0, 12.0, 0.0), Some("ada/site"), "claude-code", Kind::AgentStart { session: "s2".into() });
@@ -179,7 +179,7 @@ async fn recent(app: &TestApp, ada: &mut Browser<'_>) {
                 c.push(day(ago, 17.7), Some("scratch"), commit(&"7".repeat(40), Some(Via::Commit), Some(day(ago, 17.7) as i64), files(&[("a.txt", 1, 0)])));
                 c.push(day(ago, 18.0), None, Kind::Focus { class: Class::Editor, app: None });
                 for i in 1..=10 {
-                    c.push(day(ago, 18.0) + 60.0 * i as f64, None, Kind::Present { input: None });
+                    c.push(day(ago, 18.0) + 60.0 * i as f64, None, Kind::Present { input: None, keys: None, injected: None });
                 }
             }
             _ => {}

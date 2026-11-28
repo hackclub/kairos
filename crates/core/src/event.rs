@@ -164,10 +164,16 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<App>,
     },
-    /// `input` is 15 hex digits of a u64 whose bit i is set when there was input in the second [ts - 60 + i, ts - 59 + i). Absent when the backend can't tell.
+    /// `input` is 15 hex digits of a u64 whose bit i is set when there was input in the second [ts - 60 + i, ts - 59 + i).
+    /// `keys` is the same for key presses on a keyboard, and `injected` for input a program made (X11's XTEST devices).
+    /// Each is absent when the backend can't tell.
     Present {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        injected: Option<String>,
     },
     Idle {},
     FileSave {

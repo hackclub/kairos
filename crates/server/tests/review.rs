@@ -41,7 +41,7 @@ async fn seed(app: &TestApp) -> Browser<'_> {
     c.editing("ada/other", local(0.0, 14.0, 0.0), local(0.0, 14.0, 30.0));
     c.push(local(0.0, 16.0, 0.0), None, Kind::Focus { class: Class::Editor, app: None });
     for i in 1..=10 {
-        c.push(local(0.0, 16.0, i as f64), None, Kind::Present { input: None });
+        c.push(local(0.0, 16.0, i as f64), None, Kind::Present { input: None, keys: None, injected: None });
     }
     c.editing("ada/site", local(1.0, 23.0, 30.0), local(2.0, 0.0, 30.0));
     assert_eq!(upload(app, &laptop, c.take()).await.status, StatusCode::OK);

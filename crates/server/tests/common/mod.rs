@@ -286,7 +286,7 @@ impl Chain {
         self.push(start, Some(project), Kind::Focus { class: Class::Editor, app: None });
         let mut t = start + 60.0;
         while t <= end + 1e-9 {
-            self.push(t, None, Kind::Present { input: None });
+            self.push(t, None, Kind::Present { input: None, keys: None, injected: None });
             t += 60.0;
         }
     }

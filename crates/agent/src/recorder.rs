@@ -23,15 +23,36 @@ pub struct Recorder {
     hooks: bool,
     active: bool,
     next_present: Option<Instant>,
-    // Set while the presence backend reports `Input`; without it a present carries no input bits.
-    tracks_input: bool,
-    inputs: Vec<f64>,
+    input: Seen,
+    keys: Seen,
+    injected: Seen,
     paused_until: Option<f64>,
     // The newest focus seen while paused, written when tracking resumes so credit starts from the
     // window that is actually in front.
     held_focus: Option<Event>,
     today: Today,
     next_status: Instant,
+}
+
+/// The seconds of one kind of input. Only kept while the presence backend reports that kind; without it a present
+/// carries no bits for it.
+#[derive(Default)]
+struct Seen {
+    tracked: bool,
+    at: Vec<f64>,
+}
+
+impl Seen {
+    fn push(&mut self, t: f64) {
+        if self.tracked {
+            self.at.retain(|&s| s >= t - INPUT_WINDOW_SECS);
+            self.at.push(t);
+        }
+    }
+
+    fn bits(&self, ts: f64) -> Option<String> {
+        self.tracked.then(|| input_bits(ts, &self.at))
+    }
 }
 
 struct Today {
@@ -120,8 +141,9 @@ impl Recorder {
             hooks,
             active: false,
             next_present: None,
-            tracks_input: false,
-            inputs: Vec::new(),
+            input: Seen::default(),
+            keys: Seen::default(),
+            injected: Seen::default(),
             paused_until: pending_pause(dir),
             held_focus: None,
             today: Today::load(Local::now().date_naive()),
@@ -207,19 +229,18 @@ impl Recorder {
             Msg::PresenceReady => {
                 diag!("kairosd: presence detection active");
                 self.active = true;
-                self.tracks_input = false;
+                self.stop_input();
                 self.start_presence();
             }
-            Msg::InputReady => self.tracks_input = true,
-            Msg::Input(t) => {
-                if self.tracks_input && !self.paused() {
-                    self.inputs.retain(|&s| s >= t - INPUT_WINDOW_SECS);
-                    self.inputs.push(t);
-                }
-            }
+            Msg::InputReady => self.input.tracked = true,
+            Msg::InputKinds { keys, injected } => (self.keys.tracked, self.injected.tracked) = (keys, injected),
+            Msg::Input(t) if !self.paused() => self.input.push(t),
+            Msg::Keys(t) if !self.paused() => self.keys.push(t),
+            Msg::Injected(t) if !self.paused() => self.injected.push(t),
+            Msg::Input(_) | Msg::Keys(_) | Msg::Injected(_) => {}
             Msg::PresenceLost => {
                 self.active = false;
-                self.tracks_input = false;
+                self.stop_input();
                 self.next_present = None;
             }
             Msg::Resumed => {
@@ -241,9 +262,15 @@ impl Recorder {
         }
     }
 
+    fn stop_input(&mut self) {
+        for seen in [&mut self.input, &mut self.keys, &mut self.injected] {
+            seen.tracked = false;
+        }
+    }
+
     fn write_present(&mut self, ts: f64) {
-        let input = self.tracks_input.then(|| input_bits(ts, &self.inputs));
-        self.write(Event::new(ts, None, Kind::Present { input }));
+        let (input, keys, injected) = (self.input.bits(ts), self.keys.bits(ts), self.injected.bits(ts));
+        self.write(Event::new(ts, None, Kind::Present { input, keys, injected }));
     }
 
     fn tick(&mut self) {
@@ -367,7 +394,7 @@ mod tests {
 
     fn last_present_input(rec: &Recorder) -> Option<String> {
         match &rec.today.events.last().expect("an event was written").kind {
-            Kind::Present { input } => input.clone(),
+            Kind::Present { input, .. } => input.clone(),
             other => panic!("not a present: {other:?}"),
         }
     }
@@ -406,14 +433,49 @@ mod tests {
     }
 
     #[test]
+    fn a_present_carries_key_and_injected_seconds_only_from_a_backend_that_tells_them_apart() {
+        let (mut rec, _dir) = recorder("kinds");
+        let kinds = |rec: &Recorder| match &rec.today.events.last().expect("an event was written").kind {
+            Kind::Present { keys, injected, .. } => (keys.clone(), injected.clone()),
+            other => panic!("not a present: {other:?}"),
+        };
+        rec.handle(Msg::PresenceReady);
+        rec.handle(Msg::InputReady);
+        rec.handle(Msg::Keys(999.0));
+        rec.write_present(1000.0);
+        assert_eq!(kinds(&rec), (None, None));
+
+        rec.handle(Msg::InputKinds { keys: true, injected: true });
+        for t in [941.0, 999.5] {
+            rec.handle(Msg::Input(t));
+            rec.handle(Msg::Keys(t));
+        }
+        rec.handle(Msg::Injected(942.2));
+        rec.write_present(1000.0);
+        assert_eq!(last_present_input(&rec).as_deref(), Some("800000000000002"));
+        assert_eq!(kinds(&rec), (Some("800000000000002".into()), Some("000000000000004".into())));
+
+        rec.handle(Msg::PresenceReady);
+        rec.handle(Msg::InputReady);
+        rec.handle(Msg::InputKinds { keys: true, injected: false });
+        rec.write_present(1000.0);
+        assert_eq!(kinds(&rec), (Some("800000000000002".into()), None));
+    }
+
+    #[test]
     fn input_while_paused_is_not_kept() {
         let (mut rec, _dir) = recorder("paused");
         rec.handle(Msg::PresenceReady);
         rec.handle(Msg::InputReady);
         rec.handle(Msg::Pause(now() + 1000.0));
         rec.handle(Msg::Input(990.0));
+        rec.handle(Msg::InputKinds { keys: true, injected: true });
+        rec.handle(Msg::Keys(990.0));
+        rec.handle(Msg::Injected(990.0));
         rec.handle(Msg::Resume);
         rec.write_present(1000.0);
         assert_eq!(last_present_input(&rec).as_deref(), Some("000000000000000"));
+        let Kind::Present { keys, injected, .. } = &rec.today.events.last().unwrap().kind else { panic!("not a present") };
+        assert_eq!((keys.as_deref(), injected.as_deref()), (Some("000000000000000"), Some("000000000000000")));
     }
 }

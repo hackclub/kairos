@@ -198,7 +198,7 @@ mod tests {
         let mut prev = GENESIS.to_string();
         (0..n)
             .map(|i| {
-                let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None });
+                let mut e = Event::new(1000.0 + i as f64, None, Kind::Present { input: None, keys: None, injected: None });
                 e.seal(&prev);
                 prev = e.hash.clone();
                 e
@@ -338,7 +338,7 @@ mod tests {
     fn locate_next_finds_the_last_event_that_follows_a_hash() {
         let dir = tmp("next");
         let ev = chain(4);
-        let mut again = Event::new(2000.0, None, Kind::Present { input: None });
+        let mut again = Event::new(2000.0, None, Kind::Present { input: None, keys: None, injected: None });
         again.seal(&ev[1].hash);
         let all: Vec<Event> = ev.iter().cloned().chain([again.clone()]).collect();
         write_logs(&dir, &all, &[("2026-11-18", 3), ("2026-11-19", 2)]);

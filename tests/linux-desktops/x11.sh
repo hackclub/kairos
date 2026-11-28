@@ -10,6 +10,7 @@ openbox >/dev/null 2>&1 &
 wait_for sh -c 'xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"'
 check x11_focus_follows_the_active_window
 check x11_idle_follows_input
+check x11_idle_tells_xtest_input_from_key_presses
 check supervisor_selects_the_desktops_backends KAIROS_EXPECT_BACKENDS=x11,x11-screensaver
 
 # A daemon started by systemd has none of the session variables and finds them in other processes.

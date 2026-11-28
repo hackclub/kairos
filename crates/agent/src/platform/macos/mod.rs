@@ -60,12 +60,15 @@ fn focus(out: Sender<Option<Foreground>>) {
 }
 
 fn typed_within(secs: f64) -> bool {
-    let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::HIDSystemState, CGEventType::KeyDown);
-    key.is_finite() && key <= secs + 0.2
+    since(CGEventType::KeyDown).is_some_and(|key| key <= secs + 0.2)
 }
 
 fn idle_secs() -> Option<f64> {
-    let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::HIDSystemState, ANY_INPUT);
+    since(ANY_INPUT)
+}
+
+fn since(kind: CGEventType) -> Option<f64> {
+    let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::HIDSystemState, kind);
     (secs.is_finite() && secs >= 0.0).then_some(secs)
 }
 
@@ -77,12 +80,18 @@ fn spawn_idle(tx: Sender<Msg>) -> bool {
     thread::spawn(move || {
         let _ = tx.send(Msg::PresenceReady);
         let _ = tx.send(Msg::InputReady);
+        let _ = tx.send(Msg::InputKinds { keys: true, injected: false });
         let mut idle = false;
-        let mut input = InputWatch::default();
+        let (mut input, mut keys) = (InputWatch::default(), InputWatch::default());
         loop {
             thread::sleep(InputWatch::poll_every(idle));
             let Some(secs) = idle_secs() else { continue };
-            if input.observe(now(), secs).is_some_and(|t| tx.send(Msg::Input(t)).is_err()) {
+            let at = now();
+            if input.observe(at, secs).is_some_and(|t| tx.send(Msg::Input(t)).is_err()) {
+                return;
+            }
+            let key = since(CGEventType::KeyDown).and_then(|k| keys.observe(at, k));
+            if key.is_some_and(|t| tx.send(Msg::Keys(t)).is_err()) {
                 return;
             }
             let now_idle = secs >= IDLE_SECS;

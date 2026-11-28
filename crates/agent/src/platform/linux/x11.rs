@@ -3,18 +3,20 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt, EventMask, Window};
+use x11rb::protocol::sync::{self, ConnectionExt as _};
+use x11rb::protocol::xinput::{self, ConnectionExt as _, DeviceType};
 use x11rb::protocol::{screensaver, Event};
 use x11rb::reexports::x11rb_protocol::parse_display::parse_display;
 use x11rb::reexports::x11rb_protocol::xauth::Family;
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 
 use super::backend::{running, Reporter, Running};
-use super::presence::poll;
+use super::presence::{poll_since, Since};
 use super::session::SessionEnv;
 use crate::platform::Foreground;
 use crate::Msg;
@@ -204,10 +206,91 @@ pub fn start_idle(env: &SessionEnv, tx: Sender<Msg>, threshold: Duration) -> Res
     }
     let x = connect(env)?;
     screensaver::query_version(&x.conn, 1, 1)?.reply().context("MIT-SCREEN-SAVER is not available")?;
-    poll(IDLE_NAME, threshold, tx, move || {
+    let mut devices = Devices::read(&x).ok();
+    poll_since(IDLE_NAME, threshold, tx, move || {
         let ms = screensaver::query_info(&x.conn, x.root)?.reply()?.ms_since_user_input;
-        Ok(Duration::from_millis(ms.into()))
+        let (keys, injected) = devices.as_mut().map_or((None, None), |d| d.idle(&x));
+        Ok(Since { input: Duration::from_millis(ms.into()), keys, injected })
     })
+}
+
+/// The SYNC idle counters (`DEVICEIDLETIME <id>`) the X server keeps for each input device: the keyboards, and the
+/// XTEST devices that carry the input programs make.
+struct Devices {
+    keys: Vec<sync::Counter>,
+    injected: Vec<sync::Counter>,
+    reread_at: Instant,
+}
+
+const DEVICES_EVERY: Duration = Duration::from_secs(30);
+
+impl Devices {
+    fn read(x: &X11) -> Result<Devices> {
+        sync::initialize(&x.conn, 3, 1)?.reply().context("SYNC is not available")?;
+        xinput::xi_query_version(&x.conn, 2, 0)?.reply().context("XInput 2 is not available")?;
+        let counters: Vec<(u16, sync::Counter)> = x
+            .conn
+            .sync_list_system_counters()?
+            .reply()?
+            .counters
+            .iter()
+            .filter_map(|c| Some((std::str::from_utf8(&c.name).ok()?.strip_prefix("DEVICEIDLETIME ")?.parse().ok()?, c.counter)))
+            .collect();
+        if counters.is_empty() {
+            bail!("the X server keeps no idle time per device");
+        }
+        let xtest = x.conn.intern_atom(true, b"XTEST Device")?.reply()?.atom;
+        let mut devices = Vec::new();
+        for d in x.conn.xinput_xi_query_device(xinput::Device::ALL)?.reply()?.infos {
+            let is_xtest = xtest != x11rb::NONE
+                && x.conn.xinput_xi_get_property(d.deviceid, false, xtest, AtomEnum::ANY.into(), 0, 0)?.reply()?.type_ != x11rb::NONE;
+            devices.push((d.deviceid, d.type_, is_xtest));
+        }
+        let (keys, injected) = sort_devices(&counters, &devices);
+        Ok(Devices { keys, injected, reread_at: Instant::now() + DEVICES_EVERY })
+    }
+
+    /// How long since a keyboard was used and since an XTEST device was. A kind with no device is never.
+    fn idle(&mut self, x: &X11) -> (Option<Duration>, Option<Duration>) {
+        if Instant::now() >= self.reread_at {
+            match Devices::read(x) {
+                Ok(new) => *self = new,
+                Err(_) => self.reread_at = Instant::now() + DEVICES_EVERY,
+            }
+        }
+        let read = |counters: &[sync::Counter]| -> Option<Duration> {
+            let cookies = counters.iter().map(|&c| x.conn.sync_query_counter(c)).collect::<Result<Vec<_>, _>>().ok()?;
+            let mut least = Duration::MAX;
+            for cookie in cookies {
+                let v = cookie.reply().ok()?.counter_value;
+                let ms = (i64::from(v.hi) << 32) | i64::from(v.lo);
+                least = least.min(Duration::from_millis(u64::try_from(ms).ok()?));
+            }
+            Some(least)
+        };
+        let idle = (read(&self.keys), read(&self.injected));
+        if idle.0.is_none() || idle.1.is_none() {
+            // A device went away and took its counter with it.
+            self.reread_at = Instant::now();
+        }
+        idle
+    }
+}
+
+/// The counters of the keyboards that aren't XTEST devices, and of the XTEST devices, from (device id, counter) and
+/// (device id, type, is XTEST). Masters only repeat their slaves and floating devices reach no one, so both are left out.
+fn sort_devices(counters: &[(u16, sync::Counter)], devices: &[(u16, DeviceType, bool)]) -> (Vec<sync::Counter>, Vec<sync::Counter>) {
+    let counter = |id: u16| counters.iter().find(|c| c.0 == id).map(|c| c.1);
+    let (mut keys, mut injected) = (Vec::new(), Vec::new());
+    for &(id, kind, is_xtest) in devices {
+        let attached = kind == DeviceType::SLAVE_KEYBOARD || kind == DeviceType::SLAVE_POINTER;
+        match counter(id) {
+            Some(c) if attached && is_xtest => injected.push(c),
+            Some(c) if kind == DeviceType::SLAVE_KEYBOARD => keys.push(c),
+            _ => {}
+        }
+    }
+    (keys, injected)
 }
 
 #[cfg(test)]
@@ -261,5 +344,22 @@ mod tests {
         let path = file(&[cut]);
         assert_eq!(cookie_for(&path, Family::LOCAL, b"h", 0), None);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn keyboards_and_xtest_devices_are_told_apart_and_masters_left_out() {
+        let counters: Vec<(u16, sync::Counter)> = (2..=12).map(|id| (id, 100 + u32::from(id))).collect();
+        let devices = [
+            (2, DeviceType::MASTER_POINTER, false),
+            (3, DeviceType::MASTER_KEYBOARD, false),
+            (4, DeviceType::SLAVE_POINTER, true),
+            (5, DeviceType::SLAVE_KEYBOARD, true),
+            (6, DeviceType::SLAVE_KEYBOARD, false),
+            (7, DeviceType::SLAVE_POINTER, false),
+            (8, DeviceType::FLOATING_SLAVE, false),
+            (9, DeviceType::SLAVE_KEYBOARD, false),
+            (13, DeviceType::SLAVE_KEYBOARD, false),
+        ];
+        assert_eq!(sort_devices(&counters, &devices), (vec![106, 109], vec![104, 105]));
     }
 }

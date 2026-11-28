@@ -345,7 +345,7 @@ async fn fractional_timestamps_keep_their_hashes() {
     let mut ts = 1_773_000_000.123_456_7;
     for i in 0..2000 {
         ts += 0.731_234_567_891_3 + (i % 7) as f64 * 0.000_123_456_789;
-        chain.push(ts, None, Kind::Present { input: None });
+        chain.push(ts, None, Kind::Present { input: None, keys: None, injected: None });
     }
     let res = upload(&app, &token, chain.take()).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
@@ -359,8 +359,8 @@ async fn a_present_with_input_bits_is_stored_as_sent() {
     b.sign_in("Ada Lovelace", "ada@example.com").await;
     let token = b.pair("laptop").await;
     let mut chain = Chain::default();
-    chain.push(1_773_000_060.0, None, Kind::Present { input: Some("800000000000001".into()) });
-    chain.push(1_773_000_120.0, None, Kind::Present { input: None });
+    chain.push(1_773_000_060.0, None, Kind::Present { input: Some("800000000000001".into()), keys: None, injected: None });
+    chain.push(1_773_000_120.0, None, Kind::Present { input: None, keys: None, injected: None });
     let res = upload(&app, &token, chain.take()).await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     let c = app.st.pool.get().await.unwrap();

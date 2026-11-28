@@ -18,7 +18,7 @@ fn focus(ts: f64, class: Class, project: Option<&str>) -> Event {
 }
 
 fn present(ts: f64) -> Event {
-    ev(ts, None, Kind::Present { input: None })
+    ev(ts, None, Kind::Present { input: None, keys: None, injected: None })
 }
 
 fn prompt(ts: f64, words: usize, pasted: bool) -> Event {
@@ -703,7 +703,7 @@ fn secs_in(credits: &[Credit], class: CreditClass, lo: f64, hi: f64) -> f64 {
 }
 
 fn present_with(ts: f64, bits: &str) -> Event {
-    ev(ts, None, Kind::Present { input: Some(bits.into()) })
+    ev(ts, None, Kind::Present { input: Some(bits.into()), keys: None, injected: None })
 }
 
 fn reply_of(ts: f64, session: &str, project: Option<&str>, reply_words: usize) -> Event {

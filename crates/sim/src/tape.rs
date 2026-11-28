@@ -104,7 +104,7 @@ impl Tape {
         for (a, b) in merged {
             let mut t = a + PRESENT_EVERY;
             while t < b + IDLE_AFTER {
-                self.at(t, None, Kind::Present { input: None });
+                self.at(t, None, Kind::Present { input: None, keys: None, injected: None });
                 t += PRESENT_EVERY;
             }
             self.at(b + IDLE_AFTER, None, Kind::Idle {});

@@ -26,34 +26,67 @@ impl IdleState {
     }
 }
 
+/// One idle reading: how long since any input and, from a backend that can tell, since the last key press and the
+/// last input a program made. A kind the first reading has is reported from then on; a later reading may miss it.
+#[derive(Clone, Copy)]
+pub struct Since {
+    pub input: Duration,
+    pub keys: Option<Duration>,
+    pub injected: Option<Duration>,
+}
+
+#[derive(Default)]
+struct Watches {
+    input: InputWatch,
+    keys: InputWatch,
+    injected: InputWatch,
+}
+
+impl Watches {
+    /// The new inputs a reading shows, as messages.
+    fn observe(&mut self, at: f64, since: Since) -> [Option<Msg>; 3] {
+        let input = self.input.observe(at, since.input.as_secs_f64()).map(Msg::Input);
+        let keys = since.keys.and_then(|d| self.keys.observe(at, d.as_secs_f64())).map(Msg::Keys);
+        let injected = since.injected.and_then(|d| self.injected.observe(at, d.as_secs_f64())).map(Msg::Injected);
+        [input, keys, injected]
+    }
+}
+
 pub fn poll(
     name: &'static str,
     threshold: Duration,
     tx: Sender<Msg>,
     mut idle_time: impl FnMut() -> Result<Duration> + Send + 'static,
 ) -> Result<Running> {
+    poll_since(name, threshold, tx, move || idle_time().map(|input| Since { input, keys: None, injected: None }))
+}
+
+pub fn poll_since(
+    name: &'static str,
+    threshold: Duration,
+    tx: Sender<Msg>,
+    mut read: impl FnMut() -> Result<Since> + Send + 'static,
+) -> Result<Running> {
     let mut state = IdleState { threshold, idle: false };
-    let mut input = InputWatch::default();
-    let first = idle_time()?;
+    let mut watches = Watches::default();
+    let first = read()?;
     let at = now();
     let (handle, life) = running(name);
-    if tx.send(Msg::PresenceReady).is_err()
-        || tx.send(Msg::InputReady).is_err()
-        || input.observe(at, first.as_secs_f64()).is_some_and(|t| tx.send(Msg::Input(t)).is_err())
-        || state.observe(first).is_some_and(|m| tx.send(m).is_err())
-    {
+    let kinds = (first.keys.is_some() || first.injected.is_some())
+        .then_some(Msg::InputKinds { keys: first.keys.is_some(), injected: first.injected.is_some() });
+    let mut opening = [Msg::PresenceReady, Msg::InputReady].into_iter().chain(kinds).chain(watches.observe(at, first).into_iter().flatten());
+    if opening.any(|m| tx.send(m).is_err()) || state.observe(first.input).is_some_and(|m| tx.send(m).is_err()) {
         return Ok(handle);
     }
     thread::spawn(move || {
         let _life = life;
         loop {
             thread::sleep(InputWatch::poll_every(state.idle));
-            let Ok(idle_for) = idle_time() else { return };
-            let at = now();
-            if input.observe(at, idle_for.as_secs_f64()).is_some_and(|t| tx.send(Msg::Input(t)).is_err()) {
+            let Ok(since) = read() else { return };
+            if watches.observe(now(), since).into_iter().flatten().any(|m| tx.send(m).is_err()) {
                 return;
             }
-            if state.observe(idle_for).is_some_and(|m| tx.send(m).is_err()) {
+            if state.observe(since.input).is_some_and(|m| tx.send(m).is_err()) {
                 return;
             }
         }
@@ -102,6 +135,23 @@ mod tests {
         assert_eq!(inputs.len(), 2, "{inputs:?}");
         let two_polls = 2.0 * InputWatch::poll_every(false).as_secs_f64();
         assert!(inputs[0] <= before && inputs[1] > inputs[0] + two_polls - 0.05, "{inputs:?} {before}");
+    }
+
+    #[test]
+    fn a_backend_that_tells_keys_and_injected_input_apart_announces_and_reports_them() {
+        let (tx, rx) = mpsc::channel();
+        let since = |input, keys, injected: Option<u64>| -> Result<Since> {
+            Ok(Since { input: secs(input), keys: Some(secs(keys)), injected: injected.map(secs) })
+        };
+        let mut readings = vec![since(0, 0, Some(100)), since(0, 3, Some(0)), since(1, 1, None)];
+        readings.reverse();
+        poll_since("test", secs(60), tx, move || readings.pop().unwrap_or_else(|| Err(anyhow::anyhow!("gone")))).unwrap();
+        let msgs: Vec<Msg> = rx.iter().collect();
+        assert!(matches!(msgs[..3], [Msg::PresenceReady, Msg::InputReady, Msg::InputKinds { keys: true, injected: true }]));
+        let count = |f: fn(&Msg) -> bool| msgs.iter().filter(|m| f(m)).count();
+        assert_eq!(count(|m| matches!(m, Msg::Input(_))), 2);
+        assert_eq!(count(|m| matches!(m, Msg::Keys(_))), 1, "the second reading shows no newer key press");
+        assert_eq!(count(|m| matches!(m, Msg::Injected(_))), 2, "a reading without the kind skips it");
     }
 
     #[test]
