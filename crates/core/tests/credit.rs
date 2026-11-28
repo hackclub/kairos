@@ -668,7 +668,7 @@ fn pinned_v9_events() -> Vec<Event> {
 fn stored_credit_is_pinned_to_the_revision() {
     let events = pinned_v9_events();
     let out = format!("{:?}{:?}", Rule::CURRENT.apply(&events), agent_turns(&events));
-    assert_eq!((REVISION, blake3::hash(out.as_bytes()).to_hex().to_string()), (8, "07cf41417da66853b139b0cbfd098f7d8307fe141d76ef77314e2774c30eaafa".to_string()), "{out}");
+    assert_eq!((REVISION, blake3::hash(out.as_bytes()).to_hex().to_string()), (9, "07cf41417da66853b139b0cbfd098f7d8307fe141d76ef77314e2774c30eaafa".to_string()), "{out}");
 }
 
 fn secs_in(credits: &[Credit], class: CreditClass, lo: f64, hi: f64) -> f64 {

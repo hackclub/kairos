@@ -327,11 +327,15 @@ fn tool_id(s: &str) -> bool {
 
 async fn rebuild_tools(tx: &Transaction<'_>, user_id: i64, tz: Tz, first: NaiveDate, last: NaiveDate) -> Result<()> {
     let (lo, hi) = (day_start(tz, first), day_start(tz, next_day(last)));
+    // A copied session log (a fork, a moved or reopened thread, a second device) sends a prompt again with the same
+    // time, words and shape, and those rows stay in the chain. Each prompt counts once, as first sent.
     let rows = tx
         .query(
-            "SELECT e.ts, e.body->>'harness', COALESCE(a.canonical, e.project, '') FROM events e JOIN devices d ON d.id = e.device_id
+            "SELECT DISTINCT ON (e.ts, e.body->>'words', e.body->'shape', e.body->>'harness')
+                    e.ts, e.body->>'harness', COALESCE(a.canonical, e.project, '') FROM events e JOIN devices d ON d.id = e.device_id
              LEFT JOIN project_aliases a ON a.user_id = d.user_id AND a.alias = e.project
-             WHERE d.user_id = $1 AND e.kind = 'prompt' AND e.ts >= $2 AND e.ts < $3 AND e.body->>'harness' IS NOT NULL",
+             WHERE d.user_id = $1 AND e.kind = 'prompt' AND e.ts >= $2 AND e.ts < $3 AND e.body->>'harness' IS NOT NULL
+             ORDER BY e.ts, e.body->>'words', e.body->'shape', e.body->>'harness', e.device_id, e.seq",
             &[&user_id, &lo, &hi],
         )
         .await?;
