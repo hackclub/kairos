@@ -336,7 +336,7 @@ fn incremental_equals_full_for_a_long_turn_and_a_long_pause_uploaded_as_they_hap
     let mut batches = vec![
         vec![
             at(t0, p, Kind::Focus { class: Class::AgentTerminal, app: None }),
-            at(t0 + 10.0, p, Kind::Prompt { words: 12, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None }),
+            at(t0 + 10.0, p, Kind::Prompt { words: 12, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None, permissions: None }),
             at(t0 + 20.0, p, Kind::AgentStart { session: "s1".into() }),
         ],
         vec![at(t0 + 2.0 * h, p, Kind::Focus { class: Class::Editor, app: None })],

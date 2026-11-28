@@ -189,6 +189,7 @@ fn prompt(t: &mut Turn, m: &Value, ts: f64, out: &mut Vec<Found>) {
             shape: Some(prompt_shape(&text)),
             version: None,
             via: None,
+            permissions: None,
         },
     });
 }
@@ -320,6 +321,10 @@ impl Pi {
 }
 
 impl Source for Pi {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "pi"
     }

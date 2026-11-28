@@ -36,6 +36,8 @@ fn source(harness: &str, store: &Path) -> Option<Box<dyn Source>> {
     })
 }
 
+const NEWER: &[&str] = &["permissions"];
+
 fn ms(ts: f64) -> i64 {
     (ts * 1000.0).round() as i64
 }
@@ -95,7 +97,15 @@ fn readers_report_what_the_released_daemon_did_for_every_saved_session() {
             wrong.push(format!("{name}: no reader for {}", run["harness"]));
             continue;
         };
-        let (want, got) = (recorded(&sample), read(src.as_mut(), run["project"].as_str().unwrap()));
+        let (want, mut got) = (recorded(&sample), read(src.as_mut(), run["project"].as_str().unwrap()));
+        // A field newer than the daemon that recorded the sample is checked once a sample is recorded with it.
+        for (w, g) in want.iter().zip(got.iter_mut()) {
+            for field in NEWER {
+                if w.1.get(field).is_none() {
+                    g.1.as_object_mut().unwrap().remove(*field);
+                }
+            }
+        }
         checked += 1;
         if want.is_empty() {
             wrong.push(format!("{name}: the sample has no harness events"));

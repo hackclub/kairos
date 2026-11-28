@@ -150,6 +150,7 @@ impl Turn {
                 shape: Some(prompt_shape(text)),
                 version: self.version.clone(),
                 via: (self.desktop && self.composer).then_some(App::CodexApp),
+                permissions: None,
             },
         });
     }
@@ -375,6 +376,10 @@ fn thread_of(path: &Path) -> Option<&str> {
 }
 
 impl Source for Codex {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "codex"
     }

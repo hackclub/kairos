@@ -84,6 +84,20 @@ pub enum App {
     Unknown,
 }
 
+/// How freely the agent could act when the prompt was sent, as the harness names it. Only these names leave the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permissions {
+    Default,
+    AcceptEdits,
+    Plan,
+    Auto,
+    DontAsk,
+    BypassPermissions,
+    #[serde(other)]
+    Unknown,
+}
+
 /// What the agent was waiting on when it asked the person something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +134,8 @@ pub enum Kind {
         /// The agent app the harness's log says the person typed this in.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<App>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<Permissions>,
     },
     AgentStart {
         session: String,
@@ -261,6 +277,34 @@ pub enum Kind {
         until: f64,
     },
     Resume {},
+    /// The server's time from the reply to an accepted upload, as the server sent it.
+    Receipt {
+        token: String,
+    },
+    /// The computer just woke from this many seconds of sleep.
+    Slept {
+        secs: f64,
+    },
+    Screen {
+        locked: bool,
+    },
+    /// What the event's harness reader went through in the last hour or so, as `sources::Health` counts it.
+    Reader {
+        read: u64,
+        unreadable: u64,
+    },
+    /// Uploads failed this many times, the first at `since`, before one went through just now.
+    Uploads {
+        failed: u32,
+        since: f64,
+    },
+    /// The hypervisor kairosd runs under ("none" on real hardware) and whether the session is remote, where known.
+    Machine {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vm: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<bool>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -303,6 +347,12 @@ impl Kind {
             Kind::ProjectAlias { .. } => "project_alias",
             Kind::Pause { .. } => "pause",
             Kind::Resume {} => "resume",
+            Kind::Receipt { .. } => "receipt",
+            Kind::Slept { .. } => "slept",
+            Kind::Screen { .. } => "screen",
+            Kind::Machine { .. } => "machine",
+            Kind::Uploads { .. } => "uploads",
+            Kind::Reader { .. } => "reader",
             Kind::Unknown => "unknown",
         }
     }

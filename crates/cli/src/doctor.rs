@@ -75,7 +75,19 @@ fn duration(secs: f64) -> String {
     format!("{}h {:02}m", m / 60, m % 60)
 }
 
-fn daemon_line(status: &Value) -> String {
+fn ago(secs: f64) -> String {
+    match secs.max(0.0) as u64 {
+        s if s < 120 => format!("{s}s ago"),
+        s if s < 7200 => format!("{}m ago", s / 60),
+        s => format!("{}h ago", s / 3600),
+    }
+}
+
+fn local_time(t: f64) -> String {
+    chrono::DateTime::from_timestamp(t as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%b %-d, %H:%M").to_string()).unwrap_or_else(|| "?".into())
+}
+
+fn daemon_line(status: &Value, now: f64) -> String {
     let text = |k: &str| status[k].as_str().filter(|s| !s.is_empty());
     let mut parts = vec![format!("running {}", text("version").unwrap_or("?"))];
     if let (Some(f), Some(i)) = (text("focus"), text("idle")) {
@@ -91,13 +103,29 @@ fn daemon_line(status: &Value) -> String {
         Some(s) => parts.push(format!("browser extension seen {s}s ago")),
         None => parts.push("browser extension not seen".into()),
     }
+    if let Some(t) = status["last_upload"].as_f64() {
+        parts.push(format!("last upload {}", ago(now - t)));
+    }
     if let Some(e) = text("upload_error") {
-        parts.push(format!("upload error: {e}"));
+        match (status["upload_failures"].as_u64().filter(|n| *n > 0), status["upload_failing_since"].as_f64()) {
+            (Some(n), Some(since)) => parts.push(format!("upload error: {e} ({n} tries since {})", local_time(since))),
+            _ => parts.push(format!("upload error: {e}")),
+        }
     }
     if let Some(u) = text("update") {
         parts.push(format!("update: {u}"));
     }
     parts.join(", ")
+}
+
+/// Lines (or messages) each harness reader went through since kairosd started, and the ones it couldn't read.
+fn readers_line(status: &Value) -> Option<String> {
+    let readers = status["readers"].as_object().filter(|r| !r.is_empty())?;
+    let each = readers.iter().map(|(harness, c)| match (c["read"].as_u64().unwrap_or(0), c["unreadable"].as_u64().unwrap_or(0)) {
+        (read, 0) => format!("{harness} {read}"),
+        (read, bad) => format!("{harness} {read} ({bad} unreadable)"),
+    });
+    Some(format!("since kairosd started: {}", each.collect::<Vec<_>>().join(", ")))
 }
 
 fn is_warning(line: &str) -> bool {
@@ -189,15 +217,19 @@ pub fn doctor() -> Result<()> {
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.json::<Value>());
+    let readers = api.as_ref().ok().and_then(readers_line);
     row(
         "background app",
         match (api, install::daemon_pid(), install::daemon_running()) {
-            (Ok(status), pid, _) => format!("{}{}", daemon_line(&status), pid.map(|p| format!(", pid {p}")).unwrap_or_default()),
+            (Ok(status), pid, _) => format!("{}{}", daemon_line(&status, chrono::Utc::now().timestamp() as f64), pid.map(|p| format!(", pid {p}")).unwrap_or_default()),
             (Err(_), Some(pid), _) => format!("running (pid {pid}), local API not answering"),
             (Err(_), None, true) => "running, local API not answering".into(),
             (Err(_), None, false) => "not running".into(),
         },
     );
+    if let Some(r) = readers {
+        row("readers", r);
+    }
     row("Claude Code", found(claude::default_roots(), Path::is_dir));
     row("Codex", found(codex::default_roots(), Path::is_dir));
     row("opencode", found(vec![opencode::default_db()], Path::is_file));
@@ -241,10 +273,24 @@ mod tests {
             "paused_until": null, "upload_error": null, "update": "installing 1.3.0", "extension_seen_secs_ago": 4
         });
         assert_eq!(
-            daemon_line(&v),
+            daemon_line(&v, 1000.0),
             "running 1.2.3, focus hyprland, idle ext-idle-notify, today 1h 23m, browser extension seen 4s ago, update: installing 1.3.0"
         );
-        assert_eq!(daemon_line(&serde_json::json!({})), "running ?, browser extension not seen");
+        assert_eq!(daemon_line(&serde_json::json!({}), 1000.0), "running ?, browser extension not seen");
+        let failing = serde_json::json!({
+            "version": "1.2.3", "last_upload": 1000.0, "upload_error": "server answered 502", "upload_failures": 4,
+            "upload_failing_since": 1300.0, "extension_seen_secs_ago": null
+        });
+        let line = daemon_line(&failing, 1600.0);
+        assert!(line.starts_with("running 1.2.3, browser extension not seen, last upload 10m ago, upload error: server answered 502 (4 tries since "), "{line}");
+    }
+
+    #[test]
+    fn readers_line_from_the_local_api() {
+        let v = serde_json::json!({ "readers": { "claude-code": { "read": 1200, "unreadable": 0 }, "opencode": { "read": 40, "unreadable": 1 } } });
+        assert_eq!(readers_line(&v).as_deref(), Some("since kairosd started: claude-code 1200, opencode 40 (1 unreadable)"));
+        assert_eq!(readers_line(&serde_json::json!({ "readers": {} })), None);
+        assert_eq!(readers_line(&serde_json::json!({})), None);
     }
 
     #[test]

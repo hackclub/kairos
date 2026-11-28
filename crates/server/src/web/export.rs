@@ -59,6 +59,11 @@ const SECTIONS: &[(&str, &str)] = &[
          FROM device_networks n JOIN devices d ON d.id = n.device_id WHERE d.user_id = $1 ORDER BY n.device_id, n.since",
     ),
     (
+        "receipts",
+        "SELECT json_build_object('device_id', r.device_id, 'seq', r.seq, 'ts', r.ts, 'server_ts', r.server_ts, 'valid', r.valid)
+         FROM receipts r JOIN devices d ON d.id = r.device_id WHERE d.user_id = $1 ORDER BY r.device_id, r.seq",
+    ),
+    (
         "projects",
         "SELECT json_build_object('id', id, 'repo_url', repo_url, 'hidden', hidden, 'first_seen', first_seen, 'last_seen', last_seen)
          FROM projects WHERE user_id = $1 ORDER BY id",

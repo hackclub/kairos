@@ -477,6 +477,7 @@ pub struct OpenCode {
     since: Option<i64>,
     cursor: i64,
     progress: HashMap<String, Progress>,
+    health: super::Health,
 }
 
 impl OpenCode {
@@ -485,7 +486,7 @@ impl OpenCode {
     }
 
     pub fn named(name: &'static str, harness: &'static str, db: PathBuf) -> OpenCode {
-        OpenCode { name, harness, db, since: None, cursor: 0, progress: HashMap::new() }
+        OpenCode { name, harness, db, since: None, cursor: 0, progress: HashMap::new(), health: super::Health::default() }
     }
 
     fn replay(&mut self, sid: &str, cwd: Option<PathBuf>, version: Option<String>, msgs: &[Msg], since: i64, out: &mut Vec<Found>) {
@@ -511,6 +512,7 @@ impl OpenCode {
                         shape: Some(prompt_shape(&u.text)),
                         version: version.clone(),
                         via: (u.app && self.harness == "opencode").then_some(App::OpencodeDesktop),
+                        permissions: None,
                     },
                 });
             }
@@ -562,6 +564,7 @@ impl OpenCode {
 
     fn scan(&mut self, c: &Connection, schema: Schema, since: i64, out: &mut Vec<Found>) -> rusqlite::Result<()> {
         let (_, updated) = schema.baseline(c)?;
+        let mut read = 0;
         for (sid, dir, child) in schema.touched(c, self.cursor)? {
             if schema.side_job(c, &sid) {
                 continue;
@@ -570,11 +573,13 @@ impl OpenCode {
             if !child {
                 let from = self.progress.get(&sid).map_or(since, |p| p.u.max(since));
                 let msgs = build(schema.messages(c, &sid, from)?, schema.parts(c, &sid, from)?);
+                read += msgs.len() as u64;
                 self.replay(&sid, cwd.clone(), schema.version(c, &sid), &msgs, since, out);
             }
             self.work(c, schema, &sid, cwd.as_deref(), since, out)?;
         }
         self.cursor = self.cursor.max(updated.unwrap_or(0));
+        self.health.read += read;
         Ok(())
     }
 }
@@ -594,6 +599,10 @@ impl Source for OpenCode {
         self.harness
     }
 
+    fn health(&mut self) -> super::Health {
+        std::mem::take(&mut self.health)
+    }
+
     fn poll(&mut self) -> Vec<Found> {
         let mut out = Vec::new();
         let Some(c) = open(&self.db) else { return out };
@@ -607,6 +616,7 @@ impl Source for OpenCode {
             return out;
         };
         if self.scan(&c, schema, since, &mut out).is_err() {
+            self.health.unreadable += 1;
             out.clear();
         }
         out.sort_by(|a, b| a.ts.total_cmp(&b.ts));

@@ -219,7 +219,7 @@ impl Gen<'_> {
         let (id, project, harness) = (self.sessions[i].id.clone(), self.sessions[i].project, self.sessions[i].harness);
         let project = if self.rng.chance(0.05) { None } else { project };
         let ts = self.whole();
-        self.push(ts, project, harness, Kind::Prompt { words, pasted, model: None, session: id.clone(), shape: None, version: None, via: None });
+        self.push(ts, project, harness, Kind::Prompt { words, pasted, model: None, session: id.clone(), shape: None, version: None, via: None, permissions: None });
         let dur = if self.p.long_turns && self.rng.chance(0.15) {
             self.rng.range(3700.0, 8.0 * 3600.0)
         } else if self.rng.chance(0.3) {

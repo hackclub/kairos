@@ -185,6 +185,7 @@ fn feed(t: &mut Turn, e: &Value, out: &mut Vec<Found>) {
                     shape: Some(prompt_shape(&prompt)),
                     version: None,
                     via: None,
+                    permissions: None,
                 },
             });
         }
@@ -237,6 +238,10 @@ impl Qwen {
 }
 
 impl Source for Qwen {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "qwen_code"
     }

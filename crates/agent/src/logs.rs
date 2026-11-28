@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -9,17 +9,19 @@ use std::time::{Duration, Instant};
 use kairos_core::event::{Event, Kind, MAX_PATH_LEN};
 use kairos_core::exclude::Exclusions;
 use kairos_core::project::{project_of, Project};
-use kairos_core::sources::{self, Found};
+use kairos_core::sources::{self, Found, Health};
 use serde_json::{Map, Value};
 
 use crate::exclusions::Excluded;
 use crate::sessions::Sessions;
 use crate::shadow::Shadow;
+use crate::status::{self, Shared};
 use crate::watch::Watch;
-use crate::Msg;
+use crate::{now, Msg};
 
 const EVERY: Duration = Duration::from_secs(3);
 const SAVE_EVERY: Duration = Duration::from_secs(60);
+const HEALTH_EVERY: Duration = Duration::from_secs(3600);
 // A folder's project id changes when a remote is added or the repo renamed, so lookups expire.
 const PROJECT_TTL: Duration = Duration::from_secs(60);
 const MAX_CACHED: usize = 1024;
@@ -172,7 +174,15 @@ fn claude_dir(harness: &str, kind: &Kind) -> Option<PathBuf> {
 
 /// Also notes the folder each session runs in, and sets off the shadow when an agent finishes a turn, the moment an agent's
 /// WakaTime hook runs wakatime-cli.
-pub fn spawn(tx: Sender<Msg>, watch: Sender<Watch>, state_path: PathBuf, excluded: Arc<Excluded>, sessions: Arc<Sessions>, shadow: Arc<Shadow>) {
+pub fn spawn(
+    tx: Sender<Msg>,
+    watch: Sender<Watch>,
+    state_path: PathBuf,
+    excluded: Arc<Excluded>,
+    sessions: Arc<Sessions>,
+    shadow: Arc<Shadow>,
+    status: Shared,
+) {
     thread::spawn(move || {
         let mut srcs = sources::all();
         let saved: Value = fs::read_to_string(&state_path)
@@ -188,6 +198,7 @@ pub fn spawn(tx: Sender<Msg>, watch: Sender<Watch>, state_path: PathBuf, exclude
         let mut saved_text = String::new();
         let mut saved_at = Instant::now() - SAVE_EVERY;
         let mut sessions_saved = Instant::now();
+        let (mut health, mut health_at) = (BTreeMap::<&'static str, Health>::new(), Instant::now());
         loop {
             let mut state = Map::new();
             let mut reported = false;
@@ -211,6 +222,24 @@ pub fn spawn(tx: Sender<Msg>, watch: Sender<Watch>, state_path: PathBuf, exclude
                     }
                 }
                 state.insert(s.name().to_string(), s.state());
+                let h = s.health();
+                if h != Health::default() {
+                    let harness = s.harness();
+                    let add = |to: &mut Health| {
+                        to.read += h.read;
+                        to.unreadable += h.unreadable;
+                    };
+                    add(health.entry(harness).or_default());
+                    status::set(&status, |st| add(st.readers.entry(harness).or_default()));
+                }
+            }
+            if health_at.elapsed() >= HEALTH_EVERY {
+                for (harness, h) in std::mem::take(&mut health) {
+                    let mut e = Event::new(now(), None, Kind::Reader { read: h.read, unreadable: h.unreadable });
+                    e.harness = Some(harness.to_string());
+                    let _ = tx.send(Msg::Event(e));
+                }
+                health_at = Instant::now();
             }
             let text = Value::Object(state).to_string();
             // What was just reported is saved as read right away, or a restart within the minute would report it again.
@@ -321,7 +350,7 @@ mod tests {
         let session = || "s1".to_string();
         let kinds = |file: &Path| {
             vec![
-                Kind::Prompt { words: 12, pasted: false, model: None, session: session(), shape: None, version: None, via: None },
+                Kind::Prompt { words: 12, pasted: false, model: None, session: session(), shape: None, version: None, via: None, permissions: None },
                 Kind::AgentStart { session: session() },
                 Kind::ReplyDone { session: session(), reply_words: 40, tools: 2, files_changed: 1, model: None },
                 Kind::AgentEdit { session: session(), path: file.to_string_lossy().into_owned(), added: 3, removed: 1 },

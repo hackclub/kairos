@@ -22,7 +22,7 @@ fn present(ts: f64) -> Event {
 }
 
 fn prompt(ts: f64, words: usize, pasted: bool) -> Event {
-    ev(ts, Some("o/r"), Kind::Prompt { words, pasted, model: None, session: "s".into(), shape: None, version: None, via: None })
+    ev(ts, Some("o/r"), Kind::Prompt { words, pasted, model: None, session: "s".into(), shape: None, version: None, via: None, permissions: None })
 }
 
 fn reply(ts: f64, reply_words: usize) -> Event {
@@ -48,6 +48,16 @@ fn watching_the_agent_earns_nothing() {
     events.push(reply(600.0, 200));
     assert!(credit_v1(&events).is_empty());
     assert_eq!(total_secs(&agent_runtime(&events)), 595.0);
+}
+
+#[test]
+fn an_open_turn_runs_to_the_last_event_the_device_did_not_write_about_itself() {
+    let mut events = vec![prompt(0.0, 12, false), agent_start(5.0), present(60.0)];
+    events.push(ev(200.0, None, Kind::Receipt { token: "200".into() }));
+    events.push(ev(300.0, None, Kind::Slept { secs: 100.0 }));
+    events.push(ev(400.0, None, Kind::Screen { locked: true }));
+    events.push(ev(500.0, None, Kind::Machine { vm: Some("none".into()), remote: None }));
+    assert_eq!(total_secs(&agent_runtime(&events)), 55.0);
 }
 
 #[test]
@@ -415,7 +425,7 @@ fn v4_docs_long_after_project_work_count_as_other() {
 fn v4_chats_outside_projects_count_as_other() {
     let mut events = vec![
         ev(0.0, None, Kind::ReplyDone { session: "h".into(), reply_words: 230, tools: 0, files_changed: 0, model: None }),
-        ev(200.0, None, Kind::Prompt { words: 35, pasted: false, model: None, session: "h".into(), shape: None, version: None, via: None }),
+        ev(200.0, None, Kind::Prompt { words: 35, pasted: false, model: None, session: "h".into(), shape: None, version: None, via: None, permissions: None }),
     ];
     events.extend(presents(60.0, 240.0));
     let c = credit_v4(&events);
@@ -482,7 +492,7 @@ fn v5_matches_v4_on_typing_reading_editing_and_terminal() {
         reply(700.0, 230),
         prompt(900.0, 40, false),
         ev(1000.0, None, Kind::ReplyDone { session: "h".into(), reply_words: 230, tools: 0, files_changed: 0, model: None }),
-        ev(1200.0, None, Kind::Prompt { words: 35, pasted: false, model: None, session: "h".into(), shape: None, version: None, via: None }),
+        ev(1200.0, None, Kind::Prompt { words: 35, pasted: false, model: None, session: "h".into(), shape: None, version: None, via: None, permissions: None }),
     ];
     events.extend(presents(60.0, 1300.0));
     let c = credit_v5(&events);
@@ -521,7 +531,7 @@ fn v4_two_agents_in_two_projects_at_once_are_credited_once_each() {
         e
     };
     let prompt =
-        |session: &str| Kind::Prompt { words: 35, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None };
+        |session: &str| Kind::Prompt { words: 35, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None, permissions: None };
     let start = |session: &str| Kind::AgentStart { session: session.into() };
     let done = |session: &str| Kind::ReplyDone {
         session: session.into(),
@@ -729,7 +739,7 @@ fn in_the_codex_app(t0: f64, front: App, shows: Option<&str>, typing: u32) -> Ve
     let mut events = vec![ev(t0, shows, Kind::Focus { class: Class::AgentApp, app: Some(front) })];
     let inputs = active(t0, typing);
     events.extend((1..=10).map(|m| t0 + 60.0 * f64::from(m)).map(|t| present_with(t, &input_bits(t, &inputs))));
-    events.push(ev(t0 + 100.0, Some("o/r"), Kind::Prompt { words: 35, pasted: false, model: None, session: "app".into(), shape: None, version: None, via: Some(App::CodexApp) }));
+    events.push(ev(t0 + 100.0, Some("o/r"), Kind::Prompt { words: 35, pasted: false, model: None, session: "app".into(), shape: None, version: None, via: Some(App::CodexApp), permissions: None }));
     events.push(reply_of(t0 + 200.0, "app", Some("o/r"), 230));
     events
 }
@@ -1180,7 +1190,7 @@ fn v6_saves_during_turns_of_harnesses_without_agent_edits_are_not_evidence_but_h
             ev(
                 150.0,
                 Some("o/r"),
-                Kind::Prompt { words: 2, pasted: false, model: None, session: "c".into(), shape: None, version: None, via: None },
+                Kind::Prompt { words: 2, pasted: false, model: None, session: "c".into(), shape: None, version: None, via: None, permissions: None },
             ),
             "cursor",
         ),
@@ -1279,7 +1289,7 @@ fn v8_while_an_agent_that_saves_through_the_editor_runs_its_saves_need_typed_lin
     }
     let mut elsewhere = editor_day(agent_turn("claude-code", 100.0, Some(500.0)));
     elsewhere.extend([
-        by(ev(100.0, Some("x/y"), Kind::Prompt { words: 2, pasted: false, model: None, session: "c".into(), shape: None, version: None, via: None }), "cursor"),
+        by(ev(100.0, Some("x/y"), Kind::Prompt { words: 2, pasted: false, model: None, session: "c".into(), shape: None, version: None, via: None, permissions: None }), "cursor"),
         by(reply_of(500.0, "c", Some("x/y"), 10), "cursor"),
         editor_save(300.0, Some("src/a.rs"), Some(0), None),
     ]);
@@ -1358,7 +1368,7 @@ fn v7_a_turn_with_no_project_gates_only_editor_time_with_none() {
 fn v7_a_window_with_no_project_spends_no_projects_budget() {
     // eval/replay/repro/projectless-window: a reply in o/p and then the Claude app, which has no project, in front.
     let ask =
-        ev(-5.0, Some("o/p"), Kind::Prompt { words: 20, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None });
+        ev(-5.0, Some("o/p"), Kind::Prompt { words: 20, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None, permissions: None });
     let mut events = vec![ask, reply_of(0.0, "s1", Some("o/p"), 460), focus(1.0, Class::AgentApp, None)];
     events.extend(presents(60.0, 300.0));
     assert_eq!(secs_by(&credit_v6(&events), CreditClass::Reading, Some("o/p")), 240.0);

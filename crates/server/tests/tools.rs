@@ -97,7 +97,7 @@ async fn a_prompt_sent_again_from_a_copied_log_counts_once() {
     let uid = user_id(&app, "ada").await;
     let laptop = b.pair("laptop").await;
     let desktop = b.pair("desktop").await;
-    let prompt = |words: usize, session: &str| Kind::Prompt { words, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None };
+    let prompt = |words: usize, session: &str| Kind::Prompt { words, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None, permissions: None };
 
     let mut a = Chain::default();
     a.push_from(D + 3600.0, Some("ada/site"), "claude-code", prompt(5, "s1"));

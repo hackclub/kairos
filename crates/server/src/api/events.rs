@@ -17,6 +17,7 @@ use crate::credit;
 use crate::limits::{self, Bucket};
 use crate::live;
 use crate::networks;
+use crate::receipts;
 use crate::util::{err, hash, now, Res};
 use crate::St;
 
@@ -172,6 +173,7 @@ pub async fn upload(State(st): State<St>, ext: Extensions, h: HeaderMap, Json(up
         clock_skew: networks::clock_skew(&h),
     };
     networks::record(&tx, dev.id, &seen).await?;
+    receipts::store(&tx, st.receipt_key.as_ref(), dev.id, &up.events, &seqs, now()).await?;
 
     let mut seen: HashMap<&str, (f64, f64)> = HashMap::new();
     for r in &rows {
@@ -257,7 +259,8 @@ pub async fn upload(State(st): State<St>, ext: Extensions, h: HeaderMap, Json(up
     }
     tx.commit().await?;
     live::publish(&st, dev.user_id);
-    Ok(Json(json!({ "accepted": n, "last_hash": new_head })).into_response())
+    let receipt = receipts::issue(st.receipt_key.as_ref(), dev.id, now() as i64);
+    Ok(([(receipts::HEADER, receipt)], Json(json!({ "accepted": n, "last_hash": new_head }))).into_response())
 }
 
 async fn store_heartbeats(tx: &impl GenericClient, user_id: i64, events: &[Value], rows: &[Row], limit: f64) -> Res<()> {

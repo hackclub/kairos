@@ -121,6 +121,7 @@ fn facts(v: &Value) -> Vec<Found> {
                     shape: Some(prompt_shape(prompt)),
                     version: text("version").map(str::to_string),
                     via: None,
+                    permissions: None,
                 },
             });
         }
@@ -207,6 +208,10 @@ impl Amp {
 }
 
 impl Source for Amp {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "amp"
     }

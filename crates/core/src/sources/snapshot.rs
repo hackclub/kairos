@@ -105,6 +105,7 @@ impl Snapshots {
                         shape: t.shape.clone(),
                         version: t.version.clone(),
                         via: None,
+                        permissions: None,
                     },
                 ));
             }

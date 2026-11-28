@@ -4,17 +4,22 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::de::IgnoredAny;
 use serde_json::{json, Map, Value};
 use walkdir::WalkDir;
+
+use super::Health;
 
 const MAX_READ: u64 = 64 * 1024 * 1024;
 
 // Before the first poll (and with no restored state) existing content is skipped, so installing the app never imports old history.
+// Every store read this way holds one JSON value per line.
 pub struct Tail {
     roots: Vec<PathBuf>,
     list: Box<dyn Fn(&Path, &mut Vec<PathBuf>) + Send>,
     offsets: HashMap<PathBuf, u64>,
     since: Option<f64>,
+    health: Health,
 }
 
 fn mtime(p: &Path) -> f64 {
@@ -43,7 +48,7 @@ impl Tail {
 
     // For stores where walking every root each poll would be too slow.
     pub fn with(roots: Vec<PathBuf>, list: impl Fn(&Path, &mut Vec<PathBuf>) + Send + 'static) -> Tail {
-        Tail { roots, list: Box::new(list), offsets: HashMap::new(), since: None }
+        Tail { roots, list: Box::new(list), offsets: HashMap::new(), since: None, health: Health::default() }
     }
 
     pub fn poll(&mut self, mut each: impl FnMut(&Path, &str)) {
@@ -91,6 +96,10 @@ impl Tail {
             };
             for line in String::from_utf8_lossy(&buf[..end]).lines() {
                 if !line.trim().is_empty() {
+                    self.health.read += 1;
+                    if serde_json::from_str::<IgnoredAny>(line).is_err() {
+                        self.health.unreadable += 1;
+                    }
                     each(&path, line, off == 0);
                 }
             }
@@ -98,6 +107,10 @@ impl Tail {
         }
         self.offsets.retain(|p, _| p.exists());
         self.since = Some(started);
+    }
+
+    pub fn health(&mut self) -> Health {
+        std::mem::take(&mut self.health)
     }
 
     pub fn state(&self) -> Value {
@@ -117,5 +130,31 @@ impl Tail {
         if let Some(s) = state.get("since").and_then(Value::as_f64) {
             self.since = Some(s);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn health_counts_the_lines_read_and_the_ones_that_are_not_json() {
+        let dir = std::env::temp_dir().join(format!("kairos-tail-health-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        std::fs::write(&file, "{\"old\":1}\n").unwrap();
+        let mut tail = Tail::new(vec![dir.clone()], "jsonl", |_| false);
+        tail.poll(|_, _| {});
+        assert_eq!(tail.health(), Health { read: 0, unreadable: 0 }, "what was there before isn't read");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        f.write_all(b"{\"a\":1}\n{\"b\":\nnot json\n\n{\"c\":[1,2]}\n{\"half\":").unwrap();
+        let mut lines = 0;
+        tail.poll(|_, _| lines += 1);
+        assert_eq!((lines, tail.health()), (4, Health { read: 4, unreadable: 2 }), "a line still being written waits");
+        assert_eq!(tail.health(), Health::default(), "taken once");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

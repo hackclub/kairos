@@ -1038,7 +1038,10 @@ pub fn agent_runtime(events: &[Event]) -> Vec<Interval> {
 pub fn agent_turns(events: &[Event]) -> Vec<(Interval, Option<&str>)> {
     let mut ev: Vec<&Event> = events.iter().collect();
     ev.sort_by(|a, b| a.ts.total_cmp(&b.ts));
-    let times: Vec<f64> = ev.iter().map(|e| e.ts).collect();
+    // These are written by kairosd about itself and the computer, not by anything the agent or the person did.
+    let about_the_device =
+        |k: &Kind| matches!(k, Kind::Receipt { .. } | Kind::Slept { .. } | Kind::Screen { .. } | Kind::Machine { .. } | Kind::Uploads { .. } | Kind::Reader { .. });
+    let times: Vec<f64> = ev.iter().filter(|e| !about_the_device(&e.kind)).map(|e| e.ts).collect();
     turns_v7(&ev, agent_start, TURN_MAX_SECS)
         .into_iter()
         .filter_map(|t| {

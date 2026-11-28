@@ -210,6 +210,7 @@ fn feed(s: &mut Sess, e: &Value, out: &mut Vec<Found>) {
                     shape: Some(prompt_shape(text)),
                     version: s.version.clone(),
                     via: None,
+                    permissions: None,
                 },
             });
         }
@@ -287,6 +288,10 @@ impl CopilotCli {
 }
 
 impl Source for CopilotCli {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "copilot_cli"
     }

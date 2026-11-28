@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use kairos_core::sources::Health;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -22,6 +24,11 @@ pub struct Status {
     pub server: Option<String>,
     pub last_upload: Option<f64>,
     pub upload_error: Option<String>,
+    /// Tries that failed since the last upload that went through, and when the first of them was.
+    pub upload_failures: u32,
+    pub upload_failing_since: Option<f64>,
+    /// What each harness reader went through since kairosd started.
+    pub readers: BTreeMap<&'static str, Health>,
     pub token_rejected: bool,
     pub update: Option<String>,
     pub signin: Signin,

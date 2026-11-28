@@ -151,7 +151,7 @@ mod tests {
         Found {
             ts,
             cwd: None,
-            kind: Kind::Prompt { words, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None },
+            kind: Kind::Prompt { words, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None, permissions: None },
         }
     }
 

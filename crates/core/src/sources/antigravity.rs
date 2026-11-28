@@ -390,7 +390,7 @@ fn feed(c: &mut Conv, e: &Value, out: &mut Vec<Found>) {
         out.push(Found {
             ts,
             cwd: c.cwd.clone(),
-            kind: Kind::Prompt { words, pasted, model: c.model.clone(), session: c.id.clone(), shape, version: version(&c.root), via: None },
+            kind: Kind::Prompt { words, pasted, model: c.model.clone(), session: c.id.clone(), shape, version: version(&c.root), via: None, permissions: None },
         });
         return;
     }
@@ -456,6 +456,10 @@ impl Antigravity {
 }
 
 impl Source for Antigravity {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn name(&self) -> &'static str {
         "antigravity"
     }

@@ -292,7 +292,7 @@ impl Chain {
     }
 
     pub fn prompt(&mut self, ts: f64, project: Option<&str>, harness: &str) {
-        self.push_from(ts, project, harness, Kind::Prompt { words: 5, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None });
+        self.push_from(ts, project, harness, Kind::Prompt { words: 5, pasted: false, model: None, session: "s1".into(), shape: None, version: None, via: None, permissions: None });
     }
 
     /// Ends the turn `prompt` started, as the agent's reply does.

@@ -40,7 +40,7 @@ async fn an_upload_records_where_it_came_from_once_per_change() {
     std::fs::write(&table, "41.32.0.0\t41.47.255.255\t8452\tEG\tTE-AS\n5.9.0.0\t5.9.255.255\t24940\tDE\tHETZNER-AS\n").unwrap();
     let app = TestApp::with(&[
         ("KAIROS_IP2ASN", table.to_str().unwrap()),
-        ("KAIROS_IP_KEY", "a test key that is long enough to use"),
+        ("KAIROS_SERVER_KEY", "a test key that is long enough to use"),
         ("KAIROS_TRUSTED_PROXY", "10.0.0.0/8"),
     ])
     .await;
@@ -94,5 +94,53 @@ async fn without_a_table_or_key_uploads_still_work() {
     let r = rows(&app).await;
     assert_eq!(r.len(), 1);
     assert_eq!((r[0].0, r[0].1.as_deref(), r[0].2.as_deref(), r[0].3.as_deref()), (None, None, None, None));
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn an_upload_hands_back_a_receipt_and_one_sealed_into_the_log_is_checked() {
+    let app = TestApp::with(&[("KAIROS_SERVER_KEY", "a test key that is long enough to use")]).await;
+    let mut b = app.browser();
+    b.sign_in("Ada Lovelace", "ada@example.com").await;
+    let token = b.pair("laptop").await;
+    let other = b.pair("desktop").await;
+    let mut chain = Chain::default();
+    let post = |token: &str, events: Vec<serde_json::Value>| {
+        Request::post("/api/v1/events")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "events": events }).to_string()))
+            .unwrap()
+    };
+
+    let before = kairos_server::util::now();
+    let res = app.send(post(&token, { chain.editing("acme/site", before - 600.0, before - 540.0); chain.take() })).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let receipt = res.headers.get("kairos-receipt").unwrap().to_str().unwrap().to_string();
+    let (at, mac) = receipt.split_once('.').map(|(a, m)| (a.to_string(), m.to_string())).unwrap();
+    assert!((at.parse::<f64>().unwrap() - before).abs() < 5.0 && mac.len() == 64, "{receipt}");
+
+    let forged = format!("{}.{mac}", at.parse::<i64>().unwrap() - 86_400);
+    chain.push(before - 30.0, None, kairos_core::event::Kind::Receipt { token: receipt.clone() });
+    chain.push(before - 20.0, None, kairos_core::event::Kind::Receipt { token: forged });
+    assert_eq!(app.send(post(&token, chain.take())).await.status, StatusCode::OK);
+    let mut desk = Chain::default();
+    desk.push(before - 10.0, None, kairos_core::event::Kind::Receipt { token: receipt });
+    assert_eq!(app.send(post(&other, desk.take())).await.status, StatusCode::OK);
+
+    let c = app.st.pool.get().await.unwrap();
+    let got: Vec<(String, i64, Option<bool>)> = c
+        .query("SELECT d.name, r.server_ts, r.valid FROM receipts r JOIN devices d ON d.id = r.device_id ORDER BY r.ts", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    let at: i64 = at.parse().unwrap();
+    assert_eq!(
+        got,
+        [("laptop".to_string(), at, Some(true)), ("laptop".to_string(), at - 86_400, Some(false)), ("desktop".to_string(), at, Some(false))],
+        "a moved time and another device's receipt don't check out"
+    );
     app.finish().await;
 }

@@ -1,10 +1,12 @@
 //! Sends the sealed log as kairosd recorded it. Nothing on the way should add to it or change it.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kairos_core::account::{self, Account};
+use kairos_core::event::{Event, Kind};
 use kairos_core::upload::{self, State};
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
@@ -12,13 +14,14 @@ use serde_json::Value;
 
 use crate::diag::diag;
 use crate::status::{self, Shared};
-use crate::now;
+use crate::{now, Msg};
 
 const FIRST: Duration = Duration::from_secs(5);
 const EVERY: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const REFUSED_EVERY: Duration = Duration::from_secs(3600);
 const BATCH: usize = 5000;
+const RECEIPT_EVERY: Duration = Duration::from_secs(5 * 60);
 const REJECTED: &str = "the server rejected the token, run kairos login again";
 
 #[derive(Debug)]
@@ -31,8 +34,18 @@ enum Fail {
 }
 
 enum Reply {
-    Accepted,
+    /// With the receipt the server sent, if any.
+    Accepted(Option<String>),
     Mismatch(Option<String>),
+}
+
+fn receipt(res: &reqwest::blocking::Response) -> Option<String> {
+    let token = res.headers().get("kairos-receipt")?.to_str().ok()?;
+    (token.len() <= 96 && token.bytes().all(|b| b.is_ascii_hexdigit() || b == b'.')).then(|| token.to_string())
+}
+
+fn only_receipts(lines: &[String]) -> bool {
+    lines.iter().all(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v["kind"] == "receipt"))
 }
 
 fn post(client: &Client, acct: &Account, body: String) -> Result<Reply, Fail> {
@@ -40,12 +53,13 @@ fn post(client: &Client, acct: &Account, body: String) -> Result<Reply, Fail> {
         .post(format!("{}/api/v1/events", acct.server.trim_end_matches('/')))
         .bearer_auth(&acct.token)
         .header("Content-Type", "application/json")
+        .header("kairos-clock", format!("{:.3}", now()))
         .body(body)
         .send()
         .map_err(|e| Fail::Retry(e.to_string()))?;
     let status = res.status();
     match status {
-        StatusCode::OK => Ok(Reply::Accepted),
+        StatusCode::OK => Ok(Reply::Accepted(receipt(&res))),
         StatusCode::CONFLICT => {
             let v: Value = res.json().map_err(|e| Fail::Retry(format!("unreadable 409 body: {e}")))?;
             Ok(Reply::Mismatch(v["last_hash"].as_str().map(str::to_string)))
@@ -58,18 +72,22 @@ fn post(client: &Client, acct: &Account, body: String) -> Result<Reply, Fail> {
     }
 }
 
-fn sync(dir: &Path, acct: &Account, client: &Client, max: usize) -> Result<usize, Fail> {
+/// How many events went up, and the receipt for the last batch that held more than receipts.
+fn sync(dir: &Path, acct: &Account, client: &Client, max: usize) -> Result<(usize, Option<String>), Fail> {
     let mut state = State::load(dir);
-    let mut sent = 0;
+    let (mut sent, mut kept) = (0, None);
     let mut stuck = false;
     let save = |s: &State| s.save(dir).map_err(|e| Fail::Retry(format!("saving upload.json: {e}")));
     loop {
         upload::flush(dir);
         let Some(batch) = upload::next_batch(dir, &state, max) else {
-            return Ok(sent);
+            return Ok((sent, kept));
         };
         match post(client, acct, batch.body())? {
-            Reply::Accepted => {
+            Reply::Accepted(token) => {
+                if token.is_some() && !only_receipts(&batch.lines) {
+                    kept = token;
+                }
                 sent += batch.lines.len();
                 state = batch.end;
                 stuck = false;
@@ -101,7 +119,7 @@ fn sync(dir: &Path, acct: &Account, client: &Client, max: usize) -> Result<usize
     }
 }
 
-pub fn spawn(dir: PathBuf, status: Shared) {
+pub fn spawn(dir: PathBuf, status: Shared, tx: Sender<Msg>) {
     thread::spawn(move || {
         let client = match Client::builder()
             .timeout(Duration::from_secs(30))
@@ -114,6 +132,18 @@ pub fn spawn(dir: PathBuf, status: Shared) {
         let mut wait = FIRST;
         let mut backoff = EVERY;
         let mut halted: Option<Account> = None;
+        let mut receipted: Option<Instant> = None;
+        let mut failing: Option<(u32, f64)> = None;
+        let note_failure = |status: &Shared, failing: &mut Option<(u32, f64)>, e: String| {
+            let f = failing.get_or_insert((0, now()));
+            f.0 += 1;
+            let (n, since) = *f;
+            status::set(status, |s| {
+                s.upload_error = Some(e);
+                s.upload_failures = n;
+                s.upload_failing_since = Some(since);
+            });
+        };
         loop {
             thread::sleep(wait);
             wait = EVERY;
@@ -127,34 +157,41 @@ pub fn spawn(dir: PathBuf, status: Shared) {
                 continue;
             }
             match sync(&dir, &acct, &client, BATCH) {
-                Ok(n) => {
+                Ok((n, token)) => {
                     backoff = EVERY;
+                    if let Some((failed, since)) = failing.take() {
+                        let _ = tx.send(Msg::Event(Event::new(now(), None, Kind::Uploads { failed, since })));
+                    }
+                    if let Some(token) = token.filter(|_| receipted.is_none_or(|t| t.elapsed() >= RECEIPT_EVERY)) {
+                        let _ = tx.send(Msg::Event(Event::new(now(), None, Kind::Receipt { token })));
+                        receipted = Some(Instant::now());
+                    }
                     if n > 0 {
                         diag!("kairosd: uploaded {n} events");
                     }
                     status::set(&status, |s| {
                         s.last_upload = Some(now());
                         s.upload_error = None;
+                        s.upload_failures = 0;
+                        s.upload_failing_since = None;
                         s.token_rejected = false;
                     });
                 }
                 Err(Fail::Retry(e)) => {
                     diag!("kairosd: upload failed: {e}, retrying in {}s", backoff.as_secs());
-                    status::set(&status, |s| s.upload_error = Some(e));
+                    note_failure(&status, &mut failing, e);
                     wait = backoff;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
                 Err(Fail::Refused(e)) => {
                     diag!("kairosd: upload refused: {e}, trying again in {}s", REFUSED_EVERY.as_secs());
-                    status::set(&status, |s| s.upload_error = Some(e));
+                    note_failure(&status, &mut failing, e);
                     wait = REFUSED_EVERY;
                 }
                 Err(Fail::Rejected) => {
                     diag!("kairosd: upload stopped: the server rejected the token");
-                    status::set(&status, |s| {
-                        s.upload_error = Some(REJECTED.into());
-                        s.token_rejected = true;
-                    });
+                    note_failure(&status, &mut failing, REJECTED.into());
+                    status::set(&status, |s| s.token_rejected = true);
                     halted = Some(acct);
                 }
             }
@@ -179,9 +216,10 @@ mod tests {
         got: Vec<String>,
         posts: usize,
         force: Option<Option<String>>,
+        clocks: Vec<f64>,
     }
 
-    fn read_request(s: &mut TcpStream) -> Option<(String, Vec<u8>)> {
+    fn read_request(s: &mut TcpStream) -> Option<(String, Option<f64>, Vec<u8>)> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         let head_end = loop {
@@ -195,12 +233,13 @@ mod tests {
             }
         };
         let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-        let (mut len, mut auth) = (0, String::new());
+        let (mut len, mut auth, mut clock) = (0, String::new(), None);
         for line in head.lines() {
             if let Some((k, v)) = line.split_once(':') {
                 match k.to_ascii_lowercase().as_str() {
                     "content-length" => len = v.trim().parse().unwrap_or(0),
                     "authorization" => auth = v.trim().to_string(),
+                    "kairos-clock" => clock = v.trim().parse().ok(),
                     _ => {}
                 }
             }
@@ -212,14 +251,18 @@ mod tests {
             }
             buf.extend_from_slice(&chunk[..n]);
         }
-        Some((auth, buf[head_end..head_end + len].to_vec()))
+        Some((auth, clock, buf[head_end..head_end + len].to_vec()))
     }
 
     fn reply(s: &mut TcpStream, code: u16, body: &Value) {
+        reply_with(s, code, "", body);
+    }
+
+    fn reply_with(s: &mut TcpStream, code: u16, extra: &str, body: &Value) {
         let body = body.to_string();
         let _ = write!(
             s,
-            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
     }
@@ -230,13 +273,14 @@ mod tests {
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { continue };
-                let Some((auth, body)) = read_request(&mut s) else { continue };
+                let Some((auth, clock, body)) = read_request(&mut s) else { continue };
                 let mut srv = srv.lock().unwrap();
                 if auth != "Bearer tok" {
                     reply(&mut s, 401, &serde_json::json!({ "error": "unauthorized" }));
                     continue;
                 }
                 srv.posts += 1;
+                srv.clocks.extend(clock);
                 let v: Value = serde_json::from_slice(&body).unwrap();
                 let events = v["events"].as_array().unwrap();
                 assert!(events.len() <= 5000);
@@ -254,7 +298,8 @@ mod tests {
                 srv.got.extend(events.iter().map(|e| e["hash"].as_str().unwrap().to_string()));
                 srv.last = srv.got.last().cloned();
                 let last = srv.last.clone();
-                reply(&mut s, 200, &serde_json::json!({ "accepted": events.len(), "last_hash": last }));
+                let receipt = format!("kairos-receipt: {}.{}\r\n", 1_795_886_000 + srv.posts, "ab".repeat(32));
+                reply_with(&mut s, 200, &receipt, &serde_json::json!({ "accepted": events.len(), "last_hash": last }));
             }
         });
         url
@@ -302,19 +347,19 @@ mod tests {
         let acct = account(&stub(srv.clone()));
         let client = Client::new();
 
-        assert_eq!(sync(&dir, &acct, &client, 3).unwrap(), 7);
+        assert_eq!(sync(&dir, &acct, &client, 3).unwrap().0, 7);
         assert_eq!(srv.lock().unwrap().got, hashes(&ev[..7]));
         assert_eq!(srv.lock().unwrap().posts, 3);
         let st = State::load(&dir);
         assert_eq!(st.last_hash.as_deref(), Some(ev[6].hash.as_str()));
         assert_eq!(upload::pending(&dir, &st), 0);
 
-        assert_eq!(sync(&dir, &acct, &client, 3).unwrap(), 0);
+        assert_eq!(sync(&dir, &acct, &client, 3).unwrap().0, 0);
         assert_eq!(srv.lock().unwrap().posts, 3);
 
         write_log(&dir, "2026-11-19", &ev[4..]);
         write_log(&dir, "2026-11-20", &[]);
-        assert_eq!(sync(&dir, &acct, &client, 3).unwrap(), 2);
+        assert_eq!(sync(&dir, &acct, &client, 3).unwrap().0, 2);
         assert_eq!(srv.lock().unwrap().got, hashes(&ev));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -332,7 +377,7 @@ mod tests {
         }));
         let acct = account(&stub(srv.clone()));
 
-        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), 3);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap().0, 3);
         assert_eq!(srv.lock().unwrap().got, hashes(&ev));
         assert_eq!(srv.lock().unwrap().posts, 2);
         assert_eq!(State::load(&dir).last_hash.as_deref(), Some(ev[6].hash.as_str()));
@@ -350,7 +395,30 @@ mod tests {
         let srv = Arc::new(Mutex::new(Srv { force: Some(None), ..Srv::default() }));
         let acct = account(&stub(srv.clone()));
 
-        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), 5);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap().0, 5);
+        assert_eq!(srv.lock().unwrap().got, hashes(&ev));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_upload_sends_the_clock_and_brings_back_a_receipt_unless_it_held_only_receipts() {
+        let dir = tmp("receipt");
+        let mut ev = chain(2);
+        write_log(&dir, "2026-11-19", &ev);
+        let srv = Arc::new(Mutex::new(Srv::default()));
+        let acct = account(&stub(srv.clone()));
+
+        let before = now();
+        let (n, token) = sync(&dir, &acct, &Client::new(), 100).unwrap();
+        assert_eq!((n, token.clone()), (2, Some(format!("1795886001.{}", "ab".repeat(32)))));
+        let clock = srv.lock().unwrap().clocks[0];
+        assert!(clock >= before - 1.0 && clock <= now() + 1.0, "{clock}");
+
+        let mut r = Event::new(1003.0, None, Kind::Receipt { token: token.unwrap() });
+        r.seal(&ev[1].hash);
+        ev.push(r);
+        write_log(&dir, "2026-11-19", &ev);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), (1, None));
         assert_eq!(srv.lock().unwrap().got, hashes(&ev));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -372,10 +440,10 @@ mod tests {
         assert!(srv.lock().unwrap().got.is_empty());
         let next = record(&dir, 2000.0);
         assert_eq!(next.prev, lost);
-        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), 1);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap().0, 1);
         assert_eq!(srv.lock().unwrap().got, [next.hash.clone()]);
         let after = record(&dir, 2001.0);
-        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), 1);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap().0, 1);
         assert_eq!(srv.lock().unwrap().got, [next.hash, after.hash]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -392,7 +460,7 @@ mod tests {
         assert!(matches!(sync(&dir, &acct, &Client::new(), 100), Err(Fail::Retry(_))));
         let next = record(&dir, 2000.0);
         assert_eq!(next.prev, broken[0].hash);
-        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap(), 1);
+        assert_eq!(sync(&dir, &acct, &Client::new(), 100).unwrap().0, 1);
         assert_eq!(srv.lock().unwrap().got, [next.hash]);
         let _ = fs::remove_dir_all(&dir);
     }

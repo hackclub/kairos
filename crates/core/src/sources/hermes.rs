@@ -223,6 +223,7 @@ fn prompt(t: &mut Turn, r: &Row, out: &mut Vec<Found>) {
             shape: Some(prompt_shape(&text)),
             version: None,
             via: None,
+            permissions: None,
         },
     });
 }

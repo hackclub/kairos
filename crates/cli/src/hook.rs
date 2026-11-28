@@ -59,7 +59,7 @@ fn handle() -> Option<()> {
             let prompt = str_of("prompt").unwrap_or("");
             let (words, pasted) = prompt_stats(prompt);
             arm(&session);
-            Kind::Prompt { words, pasted, model: None, session, shape: Some(prompt_shape(prompt)), version: None, via: None }
+            Kind::Prompt { words, pasted, model: None, session, shape: Some(prompt_shape(prompt)), version: None, via: None, permissions: None }
         }
         "PreToolUse" => {
             if !disarm(&session) {

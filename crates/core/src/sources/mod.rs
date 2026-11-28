@@ -25,6 +25,14 @@ use crate::event::Kind;
 
 pub use tail::Tail;
 
+/// What a reader went through since it was last asked: lines (messages for a database) and the ones it couldn't read
+/// (for a database, reads that failed).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Health {
+    pub read: u64,
+    pub unreadable: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Found {
     pub ts: f64,
@@ -42,6 +50,10 @@ pub trait Source: Send {
         self.harness()
     }
     fn poll(&mut self) -> Vec<Found>;
+    /// The counts since the last call.
+    fn health(&mut self) -> Health {
+        Health::default()
+    }
     fn state(&self) -> Value;
     fn restore(&mut self, state: &Value);
 }

@@ -62,7 +62,7 @@ impl Tape {
             ts: ms(ts),
             project: Some(project.into()),
             harness: Some(harness.into()),
-            kind: Kind::Prompt { words, pasted, model: Some("sim-model".into()), session: session.into(), shape: None, version: None, via: None },
+            kind: Kind::Prompt { words, pasted, model: Some("sim-model".into()), session: session.into(), shape: None, version: None, via: None, permissions: None },
         });
     }
 

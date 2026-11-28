@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::claude_history::History;
 use super::t3code::T3Code;
 use super::{string_words, work, words, Found, Source, Tail};
-use crate::event::{App, Ask, Kind};
+use crate::event::{App, Ask, Kind, Permissions};
 use crate::parse::{timestamp, unwrap_pastes, user_line, UserLine};
 use crate::{prompt_shape, prompt_stats};
 
@@ -361,7 +361,7 @@ fn feed(turn: &mut Turn, e: &Value, t3: &mut T3Code, out: &mut Vec<Found>) {
             out.push(Found {
                 ts,
                 cwd: turn.start(),
-                kind: Kind::Prompt { words, pasted, model: None, session, shape, version: version(e), via: typed_in_desktop(e, "/origin/kind") },
+                kind: Kind::Prompt { words, pasted, model: None, session, shape, version: version(e), via: typed_in_desktop(e, "/origin/kind"), permissions: permissions(e) },
             });
             return;
         }
@@ -379,7 +379,7 @@ fn feed(turn: &mut Turn, e: &Value, t3: &mut T3Code, out: &mut Vec<Found>) {
             out.push(Found {
                 ts,
                 cwd: turn.start(),
-                kind: Kind::Prompt { words, pasted, model: None, session, shape, version: version(e), via: typed_in_desktop(e, "/attachment/origin/kind") },
+                kind: Kind::Prompt { words, pasted, model: None, session, shape, version: version(e), via: typed_in_desktop(e, "/attachment/origin/kind"), permissions: permissions(e) },
             });
         }
         return;
@@ -446,6 +446,18 @@ fn feed(turn: &mut Turn, e: &Value, t3: &mut T3Code, out: &mut Vec<Found>) {
 }
 
 // A prompt typed while the agent was still running gets folded into the running turn.
+fn permissions(e: &Value) -> Option<Permissions> {
+    Some(match e.get("permissionMode")?.as_str()? {
+        "default" => Permissions::Default,
+        "acceptEdits" => Permissions::AcceptEdits,
+        "plan" => Permissions::Plan,
+        "auto" => Permissions::Auto,
+        "dontAsk" => Permissions::DontAsk,
+        "bypassPermissions" => Permissions::BypassPermissions,
+        _ => return None,
+    })
+}
+
 fn version(e: &Value) -> Option<String> {
     e.get("version").and_then(Value::as_str).map(str::to_string)
 }
@@ -465,6 +477,10 @@ fn queued_prompt(e: &Value) -> Option<&str> {
 }
 
 impl Source for Claude {
+    fn health(&mut self) -> super::Health {
+        self.tail.health()
+    }
+
     fn harness(&self) -> &'static str {
         "claude-code"
     }
@@ -555,6 +571,22 @@ mod tests {
         assert_eq!(other_config_dir_in(&home, &usual, "../../.claude-work/projects/-w-p/work"), None);
         assert_eq!(other_config_dir_in(&home, &home.join(".claude-work"), "main"), Some(usual), "kairosd itself was pointed at another");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_prompt_keeps_the_permission_mode_only_when_it_is_a_known_name() {
+        let with = |mode: &str| P.replacen(r#""cwd""#, &format!(r#""permissionMode":"{mode}","cwd""#), 1);
+        let mode = |line: &str| match &run(&[line])[0].kind {
+            Kind::Prompt { permissions, .. } => *permissions,
+            k => panic!("{k:?}"),
+        };
+        assert_eq!(mode(&with("auto")), Some(Permissions::Auto));
+        assert_eq!(mode(&with("bypassPermissions")), Some(Permissions::BypassPermissions));
+        assert_eq!(mode(&with("acceptEdits")), Some(Permissions::AcceptEdits));
+        assert_eq!(mode(&with("my own words")), None);
+        assert_eq!(mode(P), None);
+        let line = serde_json::to_string(&crate::event::Event::new(1.0, None, run(&[with("dontAsk").as_str()])[0].kind.clone())).unwrap();
+        assert!(line.contains(r#""permissions":"dont_ask""#), "{line}");
     }
 
     #[test]

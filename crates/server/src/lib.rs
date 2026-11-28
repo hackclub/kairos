@@ -18,6 +18,7 @@ pub mod live;
 pub mod networks;
 pub mod prices;
 pub mod programs;
+pub mod receipts;
 pub mod security;
 pub mod signals;
 pub mod streak;
@@ -50,6 +51,7 @@ pub struct App {
     pub boards: web::leaderboards::Cache,
     pub networks: networks::Table,
     pub ip_key: Option<[u8; 32]>,
+    pub receipt_key: Option<[u8; 32]>,
 }
 
 pub type St = Arc<App>;
@@ -75,7 +77,8 @@ impl App {
         if config.ip2asn.is_some() {
             tracing::info!(ranges = networks.len(), "provider table loaded");
         }
-        let ip_key = config.ip_key.as_deref().map(networks::ip_key);
+        let ip_key = config.server_key.as_deref().map(networks::ip_key);
+        let receipt_key = config.server_key.as_deref().map(receipts::key);
         Ok(Arc::new(App {
             config,
             pool,
@@ -87,6 +90,7 @@ impl App {
             boards: web::leaderboards::Cache::default(),
             networks,
             ip_key,
+            receipt_key,
         }))
     }
 }
