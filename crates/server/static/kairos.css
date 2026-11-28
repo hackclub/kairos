@@ -567,6 +567,25 @@ section h2 {
   text-decoration: none;
 }
 
+.rows .pn {
+  display: inline-flex;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.rows .own {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rows .rp {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .rows .n a:hover {
   text-decoration: underline;
   text-underline-offset: 4px;
@@ -1059,6 +1078,19 @@ p code {
   margin: 8px 0 0;
   font-size: 14px;
   color: var(--soft);
+}
+
+.stat .split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin-top: 10px;
+  font: 12px/1.5 'IBM Plex Mono',monospace;
+}
+
+.stat .split i {
+  font-style: normal;
+  white-space: nowrap;
 }
 
 .wk {

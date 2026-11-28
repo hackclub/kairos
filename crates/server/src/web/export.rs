@@ -107,7 +107,7 @@ async fn write(st: &St, user_id: i64, out: &mut Out) -> Result<()> {
         .query_one(
             "SELECT json_build_object('id', id, 'username', username, 'display_name', display_name, 'email', email,
                 'slack_id', slack_id, 'hca_id', hca_sub, 'verification_status', verification_status, 'ysws_eligible', ysws_eligible,
-                'role', role, 'is_public', is_public, 'show_ai_tools', show_ai_tools, 'tokens_on', tokens_on, 'tokens_public', tokens_public, 'timezone', timezone, 'created_at', created_at)
+                'role', role, 'is_public', is_public, 'show_ai_tools', show_ai_tools, 'hide_projects', hide_projects, 'tokens_on', tokens_on, 'tokens_public', tokens_public, 'timezone', timezone, 'created_at', created_at)
              FROM users WHERE id = $1",
             &[&user_id],
         )

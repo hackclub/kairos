@@ -32,6 +32,7 @@ pub struct Profile {
     pub display_name: String,
     pub is_public: bool,
     pub show_ai_tools: bool,
+    pub hide_projects: bool,
     pub timezone: String,
     pub email: Option<String>,
     pub slack_id: Option<String>,
@@ -98,7 +99,7 @@ async fn show(st: &St, ctx: &Ctx, s: &Session, status: StatusCode, notice: Optio
     let c = st.pool.get().await?;
     let u = c
         .query_one(
-            "SELECT username, display_name, is_public, show_ai_tools, timezone, email, slack_id, verification_status FROM users WHERE id = $1",
+            "SELECT username, display_name, is_public, show_ai_tools, timezone, email, slack_id, verification_status, hide_projects FROM users WHERE id = $1",
             &[&s.user.id],
         )
         .await?;
@@ -111,6 +112,7 @@ async fn show(st: &St, ctx: &Ctx, s: &Session, status: StatusCode, notice: Optio
         email: u.get(5),
         slack_id: u.get(6),
         verification_status: u.get(7),
+        hide_projects: u.get(8),
     };
     let mut merged: HashMap<String, Vec<String>> = HashMap::new();
     for (alias, canonical) in aliases::map(&c, s.user.id).await? {
@@ -190,6 +192,7 @@ pub struct ProfileForm {
     display_name: String,
     is_public: Option<String>,
     show_ai_tools: Option<String>,
+    hide_projects: Option<String>,
     timezone: String,
 }
 
@@ -213,12 +216,18 @@ pub async fn profile(State(st): State<St>, ctx: Ctx, SignedIn(s): SignedIn, Form
         drop(c);
         return bad("That username is taken.".into()).await;
     }
+    let was_hiding: bool = tx.query_one("SELECT hide_projects FROM users WHERE id = $1", &[&s.user.id]).await?.get(0);
     tx.execute(
-        "UPDATE users SET username = $2, display_name = $3, is_public = $4, show_ai_tools = $5, timezone = $6, timezone_set = TRUE
+        "UPDATE users SET username = $2, display_name = $3, is_public = $4, show_ai_tools = $5, timezone = $6, timezone_set = TRUE,
+            hide_projects = $7
          WHERE id = $1",
-        &[&s.user.id, &username, &display, &f.is_public.is_some(), &f.show_ai_tools.is_some(), &tz.name()],
+        &[&s.user.id, &username, &display, &f.is_public.is_some(), &f.show_ai_tools.is_some(), &tz.name(), &f.hide_projects.is_some()],
     )
     .await?;
+    // Only the switch turning on hides everything, so a later save keeps the projects shown one by one since.
+    if f.hide_projects.is_some() && !was_hiding {
+        tx.execute("UPDATE projects SET hidden = TRUE WHERE user_id = $1", &[&s.user.id]).await?;
+    }
     if old_tz != tz {
         credit::rebuild_all(&tx, s.user.id, tz).await?;
     }

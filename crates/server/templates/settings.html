@@ -38,6 +38,7 @@ api_key = {{ k }}</pre>
       <p class="muted small" id="tznote" hidden>Detected <b id="tzdetected"></b> from your browser. Save to use it.</p>
       <label class="check"><input type="checkbox" name="is_public"{% if profile.is_public %} checked{% endif %}> Public profile at <code>/@{{ profile.username }}</code></label>
       <label class="check"><input type="checkbox" name="show_ai_tools"{% if profile.show_ai_tools %} checked{% endif %}> Show which AI tools I use on my profile</label>
+      <label class="check"><input type="checkbox" name="hide_projects"{% if profile.hide_projects %} checked{% endif %}> Hide all my projects on my profile</label>
       <button class="btn px">Save</button>
     </form>
     <p class="muted small">

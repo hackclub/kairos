@@ -174,7 +174,8 @@ pub async fn upload(State(st): State<St>, h: HeaderMap, Json(up): Json<Upload>) 
     }
     for (p, (first, last)) in &seen {
         tx.execute(
-            "INSERT INTO projects (user_id, id, repo_url, first_seen, last_seen) VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO projects (user_id, id, repo_url, hidden, first_seen, last_seen)
+             VALUES ($1, $2, $3, (SELECT hide_projects FROM users WHERE id = $1), $4, $5)
              ON CONFLICT (user_id, id) DO UPDATE SET first_seen = LEAST(projects.first_seen, EXCLUDED.first_seen),
                 last_seen = GREATEST(projects.last_seen, EXCLUDED.last_seen)",
             &[&dev.user_id, p, &repo_url(p), first, last],

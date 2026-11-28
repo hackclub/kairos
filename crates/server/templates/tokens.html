@@ -7,7 +7,9 @@
     {% else %}
       <div class="cards tok">
         {% for s in t.stats.iter() %}
-          <div class="stat px"><span>{{ s.label }}</span><b>{{ s.cost }}</b><p>{{ s.tokens }}</p></div>
+          <div class="stat px"><span>{{ s.label }}</span><b>{{ s.cost }}</b><p>{{ s.tokens }}</p>
+            {%- if !s.split.is_empty() %}<p class="split">{% for (k, v) in s.split.iter() %}<i>{{ k }} {{ v }}</i>{% endfor %}</p>{% endif -%}
+          </div>
         {% endfor %}
       </div>
       <div class="days tdays{% if t.pickable %} pickable{% if t.dim %} dim{% endif %}{% endif %}" id="tokdays">

@@ -202,6 +202,7 @@ pub struct Stat {
     pub label: &'static str,
     pub cost: String,
     pub tokens: String,
+    pub split: Vec<(&'static str, String)>,
 }
 
 /// A row of a token list: the bar is the share of tokens, the value what the list is sorted by.
@@ -339,7 +340,16 @@ pub async fn view(c: &impl GenericClient, user_id: i64, tz: chrono_tz::Tz, today
     let rows = load(c, user_id, tz, from, today, None).await?;
     let priced = Priced::of(c, &rows).await?;
     let since = |d: NaiveDate| sum(rows.iter().filter(|r| r.day >= d), &priced);
-    let stat = |label, s: Sum| Stat { label, cost: money(s.cost), tokens: tokens_text(s.n.total()) };
+    let stat = |label, s: Sum| Stat {
+        label,
+        cost: money(s.cost),
+        tokens: tokens_text(s.n.total()),
+        split: if s.n.total() > 0 {
+            vec![("In", count(s.n.input)), ("Out", count(s.n.output)), ("Cache read", count(s.n.cache_read)), ("Cache write", count(s.n.cache_write))]
+        } else {
+            Vec::new()
+        },
+    };
     let (t, w, m) = (since(today), since(ago(6)), since(month));
     let (unpriced_month, month_total) = (m.unpriced, m.n.total());
     let stats = vec![stat("Today", t), stat("This week", w), stat("Last 30 days", m)];

@@ -125,6 +125,7 @@ async fn token_stats_show_to_their_owner_and_on_public_pages_only_when_shared() 
     assert!(me.body.contains(r#"id="tokens""#) && me.body.contains("$18.75") && me.body.contains("12.6M tokens"), "{}", me.body);
     assert!(me.body.contains("big-pickle") && me.body.contains("no price") && me.body.contains("Models with no known price"), "{}", me.body);
     assert!(me.body.contains(r#"id="tokdays""#) && me.body.contains(r#"id="tokboxes""#));
+    assert!(me.body.contains("<i>In 1.5M</i><i>Out 100K</i><i>Cache read 10M</i><i>Cache write 1M</i>"), "{}", me.body);
 
     let project = ada.get("/@ada/p/ada/site").await;
     assert!(project.body.contains("$12.50") && project.body.contains("11.6M") && project.body.contains("API cost per focus hour"), "{}", project.body);

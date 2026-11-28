@@ -10,7 +10,11 @@
             <li>
               <span class="n" title="{{ r.label }}">
                 {%- if let Some(c) = r.color %}<i style="--c:{{ c }}"></i>{% endif %}
-                {%- if let Some(h) = r.href %}<a href="{{ h }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif -%}
+                {%- if let Some((owner, repo)) = r.split() -%}
+                  {%- if let Some(h) = r.href %}<a class="pn" href="{{ h }}">{% else %}<span class="pn">{% endif -%}
+                  <span class="own">{{ owner }}</span><span class="rp">{{ repo }}</span>
+                  {%- if r.href.is_some() %}</a>{% else %}</span>{% endif -%}
+                {%- else if let Some(h) = r.href %}<a href="{{ h }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif -%}
               </span><span class="bar"{% if let Some(c) = r.color %} style="--c:{{ c }}"{% endif %}><b style="width:{{ r.pct }}%"></b></span><span class="t">{{ r.time }}</span>
             </li>
           {% endfor %}

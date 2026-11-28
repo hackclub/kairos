@@ -28,6 +28,14 @@ pub struct Row {
     pub time: String,
 }
 
+impl Row {
+    /// "owner" and "/repo" of a repo-style name, so the owner can shrink before the repo does.
+    pub fn split(&self) -> Option<(&str, &str)> {
+        let i = self.label.rfind('/')?;
+        Some(self.label.split_at(i))
+    }
+}
+
 pub struct DayBar {
     pub title: String,
     pub pct: String,

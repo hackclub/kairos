@@ -472,6 +472,48 @@ async fn public_profile_hides_hidden_projects() {
 }
 
 #[tokio::test]
+async fn hide_all_hides_every_project_and_new_ones_until_turned_off() {
+    let app = TestApp::new().await;
+    let mut b = app.browser();
+    b.sign_in("Ada Lovelace", "ada@example.com").await;
+    let token = b.pair("laptop").await;
+    let now = kairos_server::util::now().floor() - 7200.0;
+    let mut chain = Chain::default();
+    chain.editing("acme/first", now, now + 300.0);
+    chain.editing("acme/second", now + 300.0, now + 600.0);
+    assert_eq!(upload(&app, &token, chain.take()).await.status, StatusCode::OK);
+    let csrf = b.csrf().await;
+    let save = |hide: bool| {
+        let mut form = vec![("csrf", csrf.as_str()), ("username", "ada"), ("timezone", "UTC"), ("is_public", "on")];
+        if hide {
+            form.push(("hide_projects", "on"));
+        }
+        form
+    };
+
+    b.post("/settings/profile", &save(true)).await;
+    let page = app.browser().get("/@ada").await.body;
+    assert!(!page.contains("acme/first") && !page.contains("acme/second") && page.contains("Private projects"), "{page}");
+    assert!(b.get("/me").await.body.contains(r#"<span class="own">acme</span><span class="rp">/first</span>"#));
+
+    b.post("/settings/projects", &[("csrf", &csrf), ("project", "acme/first"), ("hidden", "0")]).await;
+    b.post("/settings/profile", &save(true)).await;
+    let page = app.browser().get("/@ada").await.body;
+    assert!(page.contains("acme/first") && !page.contains("acme/second"), "a later save keeps what was shown by hand");
+
+    chain.editing("acme/third", now + 600.0, now + 900.0);
+    assert_eq!(upload(&app, &token, chain.take()).await.status, StatusCode::OK);
+    assert!(!app.browser().get("/@ada").await.body.contains("acme/third"), "a new project starts hidden");
+
+    b.post("/settings/profile", &save(false)).await;
+    chain.editing("acme/fourth", now + 900.0, now + 1200.0);
+    assert_eq!(upload(&app, &token, chain.take()).await.status, StatusCode::OK);
+    let page = app.browser().get("/@ada").await.body;
+    assert!(page.contains("acme/fourth") && !page.contains("acme/third"), "turning it off shows new projects and leaves the rest as they are");
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn a_device_reaches_far_behind_what_it_already_sent_only_a_few_times() {
     let app = TestApp::new().await;
     let mut b = app.browser();
