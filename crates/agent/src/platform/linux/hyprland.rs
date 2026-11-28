@@ -1,6 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -12,16 +11,6 @@ use super::session::SessionEnv;
 use crate::platform::Foreground;
 
 pub const NAME: &str = "hyprland";
-
-fn socket_dir(env: &SessionEnv) -> Option<PathBuf> {
-    let sig = env.hyprland_signature()?;
-    let mut candidates = Vec::new();
-    if let Some(rt) = env.runtime_dir() {
-        candidates.push(rt.join("hypr").join(sig));
-    }
-    candidates.push(PathBuf::from("/tmp/hypr").join(sig));
-    candidates.into_iter().find(|d| d.join(".socket2.sock").exists())
-}
 
 #[derive(Deserialize)]
 struct Window {
@@ -51,7 +40,7 @@ fn changes_focus(line: &[u8]) -> bool {
 }
 
 pub fn start(env: &SessionEnv, fg: Sender<Option<Foreground>>) -> Result<Running> {
-    let dir = socket_dir(env).ok_or_else(|| anyhow!("no Hyprland socket"))?;
+    let dir = env.hyprland_dir().ok_or_else(|| anyhow!("no Hyprland socket"))?;
     let events = UnixStream::connect(dir.join(".socket2.sock"))?;
     let (handle, life) = running(NAME);
     thread::spawn(move || {

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#   tests/linux-desktops/run.sh [x11 | x11-late | sway | dbus | all]
+#   tests/linux-desktops/run.sh [x11 | x11-late | sway | sway-restart | dbus | all]
 # Needs docker and cargo.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 image=${KAIROS_DESKTOP_IMAGE:-kairos-desktops}
 scenarios=${1:-all}
-[ "$scenarios" = all ] && scenarios="x11 x11-late sway dbus"
+[ "$scenarios" = all ] && scenarios="x11 x11-late sway sway-restart dbus"
 
 docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" tests/linux-desktops
 
