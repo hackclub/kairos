@@ -2,6 +2,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{upload, user_id, Chain, TestApp};
+use kairos_core::event::Kind;
 
 const D: f64 = 1773100800.0;
 
@@ -85,6 +86,35 @@ async fn a_later_upload_updates_the_days_it_touches() {
     c.prompt(D + 300.0, None, "gemini-cli");
     assert_eq!(upload(&app, &token, c.take()).await.status, StatusCode::OK);
     assert_eq!(tools(&app, uid).await, rows(&[("2026-03-10", "cursor", 2), ("2026-03-10", "gemini-cli", 1)]));
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn a_prompt_sent_again_from_a_copied_log_counts_once() {
+    let app = TestApp::new().await;
+    let mut b = app.browser();
+    b.sign_in("Ada Lovelace", "ada@example.com").await;
+    let uid = user_id(&app, "ada").await;
+    let laptop = b.pair("laptop").await;
+    let desktop = b.pair("desktop").await;
+    let prompt = |words: usize, session: &str| Kind::Prompt { words, pasted: false, model: None, session: session.into(), shape: None, version: None, via: None };
+
+    let mut a = Chain::default();
+    a.push_from(D + 3600.0, Some("ada/site"), "claude-code", prompt(5, "s1"));
+    a.push_from(D + 3700.0, Some("ada/site"), "claude-code", prompt(7, "s1"));
+    a.push_from(D + 3700.0, Some("ada/site"), "claude-code", prompt(9, "s2"));
+    assert_eq!(upload(&app, &laptop, a.take()).await.status, StatusCode::OK);
+    // A forked session repeats the first prompt, later in the same chain.
+    a.push_from(D + 3600.0, Some("ada/site"), "claude-code", prompt(5, "fork"));
+    assert_eq!(upload(&app, &laptop, a.take()).await.status, StatusCode::OK);
+    let mut d = Chain::default();
+    d.push_from(D + 3700.0, None, "claude-code", prompt(7, "s1"));
+    assert_eq!(upload(&app, &desktop, d.take()).await.status, StatusCode::OK);
+
+    assert_eq!(tools(&app, uid).await, rows(&[("2026-03-10", "claude-code", 3)]));
+    app.exec("DELETE FROM user_tool_days").await;
+    kairos_server::credit::rebuild_user(&app.st.pool, uid).await.unwrap();
+    assert_eq!(tools(&app, uid).await, rows(&[("2026-03-10", "claude-code", 3)]));
     app.finish().await;
 }
 

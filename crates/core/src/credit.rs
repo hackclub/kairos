@@ -79,7 +79,7 @@ impl CreditClass {
 
 /// Bump it whenever the live rule (`Rule::CURRENT`), `agent_turns` or the server's span and day building would store something different (a test
 /// pins the output): a server rebuilds every user stored under an older revision when it starts.
-pub const REVISION: i32 = 8;
+pub const REVISION: i32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
