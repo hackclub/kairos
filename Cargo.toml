@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/cli", "crates/agent", "crates/server", "crates/release", "crates/sim"]
 
 [workspace.package]
-version = "0.1.25"
+version = "0.1.26"
 
 [profile.dev]
 debug = 0
