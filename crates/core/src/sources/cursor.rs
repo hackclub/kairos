@@ -853,6 +853,38 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_looked_done_before_its_first_tool_call_runs_again() {
+        let f = Fixture::new("thinks");
+        let mut src = Cursor::new(vec![f.root.clone()]);
+        assert!(src.poll().is_empty());
+
+        // Cursor 3.13 (berke-volkan, 11-26): an empty reply sits still while the model thinks, the chat not marked generating.
+        let t0 = now().ceil() + 1.0;
+        f.put("composerData:c5", json!({ "composerId": "c5", "status": "completed" }));
+        f.user("c5", "u1", t0, "why does the build fail on windows");
+        f.put("bubbleId:c5:r1", json!({ "_v": 3, "type": 2, "text": "", "createdAt": (t0 + 1.0) * 1000.0 }));
+        assert_eq!(names(&src.poll()), ["prompt"]);
+        settle(&mut src);
+        let out = src.poll();
+        assert_eq!(names(&out), ["reply_done"]);
+        assert!(matches!(&out[0].kind, Kind::ReplyDone { reply_words: 0, tools: 0, .. }), "{:?}", out[0].kind);
+
+        let (key, v) = f.tool("c5", "t1", t0 + 20.0, "read_file_v2", "completed", json!({}), json!({}));
+        f.put(&key, v);
+        let out = src.poll();
+        assert_eq!(names(&out), ["agent_start"]);
+        assert_eq!(out[0].ts, t0 + 20.0);
+
+        f.put("bubbleId:c5:r2", json!({ "_v": 3, "type": 2, "text": "The path uses a forward slash.", "createdAt": (t0 + 25.0) * 1000.0 }));
+        assert!(src.poll().is_empty());
+        settle(&mut src);
+        let out = src.poll();
+        assert_eq!(names(&out), ["reply_done"], "the run the agent started ends");
+        assert!(matches!(&out[0].kind, Kind::ReplyDone { reply_words: 6, tools: 1, .. }), "{:?}", out[0].kind);
+        assert!(src.poll().is_empty());
+    }
+
+    #[test]
     fn deletes_count_the_last_copy_the_chat_left_or_the_file_before_the_chat() {
         let f = Fixture::new("delete");
         let mut src = Cursor::new(vec![f.root.clone()]);

@@ -42,6 +42,8 @@ struct Seen {
     sent: [usize; 3],
     // The last write seen while the turn ran.
     ran: f64,
+    // When the turn's reply_done went out.
+    closed: f64,
     // Edits and commits go out in time order; `w` is the last one's time and `wn` how many share it.
     w: f64,
     wn: u32,
@@ -106,9 +108,14 @@ impl Snapshots {
                     },
                 ));
             }
+            // An app can show a turn as done before its agent starts (Cursor, while the model thinks before its first tool
+            // call). When the agent does start, the turn runs again and its next end counts what came after.
+            if st.done && !st.started && t.started.is_some() {
+                st.done = false;
+            }
             if let (false, false, Some(ts)) = (st.started, st.paused, t.started) {
                 st.started = true;
-                out.push(found(ts, Kind::AgentStart { session: session.to_string() }));
+                out.push(found(ts.max(st.closed), Kind::AgentStart { session: session.to_string() }));
             }
             let reply = |sent: &mut [usize; 3]| {
                 let now = [t.reply_words, t.tools, t.files];
@@ -134,6 +141,7 @@ impl Snapshots {
                 if t.cut_off && st.ran > 0.0 && !st.paused {
                     ts = ts.min(st.ran);
                 }
+                st.closed = ts;
                 out.push(found(ts, reply(&mut st.sent)));
             }
         }
@@ -174,7 +182,7 @@ impl Snapshots {
         let sessions: Map<String, Value> = self
             .seen
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "u": s.u, "s": s.started, "d": s.done, "p": s.paused, "c": s.sent, "r": s.ran, "w": s.w, "n": s.wn })))
+            .map(|(k, s)| (k.clone(), json!({ "u": s.u, "s": s.started, "d": s.done, "p": s.paused, "c": s.sent, "r": s.ran, "e": s.closed, "w": s.w, "n": s.wn })))
             .collect();
         json!({ "since": self.since, "sessions": sessions })
     }
@@ -193,6 +201,7 @@ impl Snapshots {
                     paused: s.get("p").and_then(Value::as_bool).unwrap_or(false),
                     sent: s.get("c").and_then(|c| serde_json::from_value(c.clone()).ok()).unwrap_or_default(),
                     ran: s.get("r").and_then(Value::as_f64).unwrap_or(0.0),
+                    closed: s.get("e").and_then(Value::as_f64).unwrap_or(0.0),
                     w: s.get("w").and_then(Value::as_f64).unwrap_or(0.0),
                     wn: s.get("n").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
                 },
