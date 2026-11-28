@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::account::write_private;
+use crate::account::{self, write_private, DEFAULT_SERVER};
 use crate::paths::API_PORT;
 
 const STATE: &str = "wakatime.json";
@@ -80,12 +80,22 @@ fn is_kairos(url: &str) -> bool {
     ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"].iter().any(|name| host.eq_ignore_ascii_case(&format!("{name}:{API_PORT}")))
 }
 
-/// `None` when Kairos has not taken a config over, WakaTime had no api key, or the saved url is Kairos itself.
+/// The Kairos server takes heartbeats straight from an editor key too, so passing them on to it would store each one twice.
+fn is_kairos_server(data: &Path, url: &str) -> bool {
+    let Some(host) = authority(url) else {
+        return false;
+    };
+    let servers = [Some(DEFAULT_SERVER.to_string()), account::load(data).map(|a| a.server)];
+    servers.iter().flatten().any(|s| authority(s).is_some_and(|h| h.eq_ignore_ascii_case(host)))
+}
+
+/// `None` when Kairos has not taken a config over, WakaTime had no api key, or the saved url is Kairos itself (this
+/// device or the server).
 pub fn upstream(data: &Path) -> Option<Upstream> {
     let s = state(data)?;
     let key = s.api_key?;
     let url = normalize(s.api_url.as_deref().unwrap_or(DEFAULT_API_URL)).to_string();
-    (authority(&url).is_some() && !is_kairos(&url)).then_some(Upstream { url, key })
+    (authority(&url).is_some() && !is_kairos(&url) && !is_kairos_server(data, &url)).then_some(Upstream { url, key })
 }
 
 /// Where Hackatime's setup points wakatime-cli.
